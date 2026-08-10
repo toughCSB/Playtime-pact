@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "decidedAt": "2026-08-04",
+  "plan": ".gjc/_session-019fc7a4-e53b-7000-808c-e780a6838649/plans/ralplan/remote-parent-approval-20260803/pending-approval.md",
+  "provider": {
+    "selected": "cloudflare-workers-d1-fcm",
+    "fallback": "firebase-firestore-cloud-functions",
+    "reasons": [
+      "D1 batch transactions roll back the entire sequence on statement failure.",
+      "Workers Free plus D1 Free can operate without a payment method and the executable cost model retains more than 5x headroom.",
+      "Firebase production Cloud Functions requires Blaze billing, so it violates the no-card preference even though Firestore Spark itself is free."
+    ],
+    "officialSources": [
+      "https://developers.cloudflare.com/d1/platform/pricing/",
+      "https://developers.cloudflare.com/d1/platform/limits/",
+      "https://developers.cloudflare.com/d1/worker-api/d1-database/",
+      "https://firebase.google.com/docs/projects/billing/firebase-pricing-plans",
+      "https://firebase.google.com/docs/functions/get-started"
+    ]
+  },
+  "authentication": {
+    "selected": "ES256 JOSE request proof with RFC 9530 body digest, server nonce, idempotency key, actor id, membership epoch, service epoch, method and canonical URL",
+    "rejected": [
+      "Push payload authority",
+      "Bearer provider secrets in clients",
+      "Persisted reusable offline grants",
+      "Unreviewed HTTP-signature canonicalization shared across incompatible runtimes"
+    ],
+    "keyStorage": {
+      "android": "Android Keystore non-exportable P-256 key with per-privileged-mutation user authentication",
+      "windows": "LocalMachine CNG key accessible only to the signed privileged broker service",
+      "worker": "Registered public JWK only"
+    }
+  },
+  "android": {
+    "minSdk": 28,
+    "targetSdk": 36,
+    "compileSdk": 36,
+    "rationale": "API 28 provides platform BiometricPrompt and optional StrongBox while preserving broad device coverage; notification permission is handled conditionally on API 33+.",
+    "update": {
+      "delivery": "direct signed APK with explicit PackageInstaller handoff",
+      "manifest": "TLS plus independently signed ES256 metadata containing versionCode, minimumVersionCode, URL, SHA-256, size, release notes and signer lineage",
+      "failClosed": ["unknown manifest signer", "digest mismatch", "downgrade", "unsupported version floor", "signer-lineage mismatch"]
+    },
+    "officialSources": [
+      "https://developer.android.com/privacy-and-security/keystore",
+      "https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder#setIsStrongBoxBacked(boolean)",
+      "https://developer.android.com/reference/androidx/biometric/BiometricPrompt",
+      "https://developer.android.com/develop/ui/compose/notifications/notification-permission",
+      "https://developer.android.com/reference/android/content/pm/PackageInstaller",
+      "https://developer.android.com/tools/apksigner"
+    ]
+  },
+  "privacyAndOperations": {
+    "requestRetentionDays": 30,
+    "securityAuditRetentionDays": 90,
+    "deletedHouseholdTombstoneDays": 7,
+    "reRequestCooldownSeconds": 15,
+    "requestRatePerPcPerMinute": 4,
+    "mutationRatePerActorPerMinute": 12,
+    "notificationPayload": "opaque household/request wake-up identifiers only; no child name, game, allowance or decision",
+    "defaultEnvironmentMode": "LOCAL_ONLY",
+    "quotaAlertsPercent": [50, 75, 90]
+  },
+  "externalProductionGates": [
+    "Cloudflare and FCM project credentials",
+    "Windows production code-signing identity and service installer approval",
+    "Android production signing key custody, backup and rotation owner",
+    "Production retention/privacy owner and deletion SLA",
+    "One-household canary approval"
+  ]
+}

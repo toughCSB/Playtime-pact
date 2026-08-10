@@ -1,0 +1,8 @@
+{
+  "name": "playtime-pact-remote-backend",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test ../tests/remoteApprovalBackend.test.mjs" },
+  "dependencies": { "jose": "6.2.8" },
+  "devDependencies": { "wrangler": "^3.0.0" }
+}

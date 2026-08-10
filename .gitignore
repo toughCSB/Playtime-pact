@@ -1,0 +1,39 @@
+node_modules/
+out/
+dist/
+dist-*/
+dist-v*/
+*.log
+.env.local
+.env
+.DS_Store
+.kkirikkiri/
+.omo/
+artifacts/
+
+# Agent tooling session state
+.claude/
+.gjc/
+.omx/
+
+# Local credentials and signing material
+.dev.vars
+.dev.vars.*
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+
+# Wrangler local state (contains request/network metadata)
+.wrangler/
+
+# Android build outputs
+android-parent/.gradle/
+android-parent/build/
+android-parent/app/build/
+
+# Local/private project writeups
+01-idea-brief.md
+AI_CASE_STUDY.md
+AI_CASE_STUDY_2.md

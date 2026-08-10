@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "library": {
+    "name": "jose",
+    "version": "6.2.8"
+  },
+  "algorithm": "ES256",
+  "testOnlyPrivateJwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "RD5y0WyFcRC0y6UpuVjP5BhpaJeydOWFaWKOj8gRGWM",
+    "y": "IiMy7SxjNbsvY_agm_Lweo_jTeducGFpS5SWvxOjd4A",
+    "d": "eRQrsh696y6g8TNSrZgQx8WiDxqTs620Ue9L6XNapJU"
+  },
+  "publicJwk": {
+    "kty": "EC",
+    "x": "RD5y0WyFcRC0y6UpuVjP5BhpaJeydOWFaWKOj8gRGWM",
+    "y": "IiMy7SxjNbsvY_agm_Lweo_jTeducGFpS5SWvxOjd4A",
+    "crv": "P-256"
+  },
+  "request": {
+    "method": "POST",
+    "url": "https://approval.example/v1/requests/r1/respond",
+    "body": "{\"decision\":\"approve\",\"minutes\":20}",
+    "actorId": "parent-vector",
+    "membershipEpoch": 3,
+    "serviceEpoch": 8,
+    "nonce": "nonce-vector-0001",
+    "idempotencyKey": "idempotency-vector-0001",
+    "nowSeconds": 4000,
+    "jti": "jti-vector-0001"
+  },
+  "proof": {
+    "signature": "oMW_tE4_aBvjKzbMjnx68FrJpm1Y4l3gvJtjV81YTrJwUF3DcC4jQVtpP1lzLpApEeAWRc6KRBukgGftspxNNA",
+    "payload": "eyJhY3RvcklkIjoicGFyZW50LXZlY3RvciIsImNvbnRlbnREaWdlc3QiOiJzaGEtMjU2PTp5Z28zdGFuSFZ5TE84MUdST1ZNcEhHQ05XT3dKK3puQjZLaVJnUVNDbVl3PToiLCJodG0iOiJQT1NUIiwiaHR1IjoiaHR0cHM6Ly9hcHByb3ZhbC5leGFtcGxlL3YxL3JlcXVlc3RzL3IxL3Jlc3BvbmQiLCJpYXQiOjQwMDAsImlkZW1wb3RlbmN5S2V5IjoiaWRlbXBvdGVuY3ktdmVjdG9yLTAwMDEiLCJqdGkiOiJqdGktdmVjdG9yLTAwMDEiLCJtZW1iZXJzaGlwRXBvY2giOjMsIm5vbmNlIjoibm9uY2UtdmVjdG9yLTAwMDEiLCJzZXJ2aWNlRXBvY2giOjh9",
+    "protected": "eyJhbGciOiJFUzI1NiIsImp3ayI6eyJrdHkiOiJFQyIsIngiOiJSRDV5MFd5RmNSQzB5NlVwdVZqUDVCaHBhSmV5ZE9XRmFXS09qOGdSR1dNIiwieSI6IklpTXk3U3hqTmJzdllfYWdtX0x3ZW9falRlZHVjR0ZwUzVTV3Z4T2pkNEEiLCJjcnYiOiJQLTI1NiJ9LCJ0eXAiOiJyZW1vdGUtYXBwcm92YWwrandzIn0"
+  }
+}

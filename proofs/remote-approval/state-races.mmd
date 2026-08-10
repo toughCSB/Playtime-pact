@@ -1,0 +1,37 @@
+stateDiagram-v2
+  [*] --> LOCAL_ONLY
+  LOCAL_ONLY --> REMOTE_ENABLED: environment + household explicitly enabled
+  REMOTE_ENABLED --> LOCAL_ONLY: outage / quota / rollback / operator disable
+  REMOTE_ENABLED --> LOCAL_ONLY: membership reset or household delete
+
+  state RequestLifecycle {
+    [*] --> Pending
+    Pending --> Approved: first active parent approval CAS
+    Pending --> Expired: authoritative now >= created + 300s
+    Pending --> Pending: immutable personal rejection
+    Approved --> [*]
+    Expired --> [*]
+  }
+
+  state GrantLifecycle {
+    [*] --> Issued: approval transaction creates reservation
+    Issued --> Consuming: exact request + PC + game + allowance + process identity
+    Consuming --> Consumed: authoritative one-use CAS + debit commit
+    Consuming --> Indeterminate: response lost after dispatch
+    Indeterminate --> Issued: authoritative reconciliation says not consumed
+    Indeterminate --> ConsumedWithoutStart: authoritative reconciliation says consumed
+    Consumed --> Started: final local policy recheck and broker start
+    Consumed --> ConsumedWithoutStart: policy/start failure; never reissue
+  }
+
+  state ProcessRace {
+    [*] --> Idle
+    Idle --> LocalClaimed: first eligible later PID/start-time identity
+    Idle --> RemoteConsuming: remote grant consume begins
+    LocalClaimed --> Started: final policy + broker start
+    LocalClaimed --> TerminalDenied: policy/start failure; no rebinding
+    RemoteConsuming --> Started: consume commit + final policy + broker start
+    RemoteConsuming --> Indeterminate: transport uncertainty
+    Indeterminate --> Idle: authority proves not consumed
+    Indeterminate --> ConsumedWithoutStart: authority proves consumed
+  }
