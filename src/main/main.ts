@@ -10,6 +10,7 @@ import { ServerClock } from './remoteApproval/serverClock'
 import { RemoteStartCoordinator } from './remoteApproval/startCoordinator'
 import { RemoteApprovalApiClient } from './remoteApproval/apiClient'
 import { PRIVILEGED_PIPE, PrivilegedApprovalService, PrivilegedBrokerClient, namedPipeTransport, startPrivilegedPipeServer, type ProtectedLocalPolicy } from './remoteApproval/privilegedService'
+import { formatPrivilegedHealthDiagnostic } from './remoteApproval/privilegedHealthDiagnostic'
 import { loadRemoteApprovalRuntimeConfig, RemoteApprovalConfigError, remoteMutableStatePath, WindowsCngRemoteApprovalBroker, type RemoteApprovalRuntimeConfig } from './remoteApproval/runtimeBroker'
 import { requireAdminSession } from './adminAuth'
 import {
@@ -1798,7 +1799,10 @@ if (privilegedConfigCheckMode) {
   app.whenReady().then(async () => {
     await privilegedBroker.healthCheck()
     app.exit(0)
-  }).catch(() => app.exit(1))
+  }).catch((error: unknown) => {
+    process.stderr.write(formatPrivilegedHealthDiagnostic(error))
+    app.exit(1)
+  })
 } else {
 app.whenReady().then(async () => {
   try {

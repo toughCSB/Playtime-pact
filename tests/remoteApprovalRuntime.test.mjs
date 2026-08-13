@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { createServer } from 'node:net'
 
 import { describe, expect, it } from 'vitest'
 
@@ -11,6 +12,7 @@ import { loadRemoteApprovalRuntimeConfig, WindowsCngRemoteApprovalBroker } from 
 import { ServerClock } from '../src/main/remoteApproval/serverClock'
 import { RemoteStartCoordinator } from '../src/main/remoteApproval/startCoordinator'
 import { PRIVILEGED_PIPE, PrivilegedApprovalService, PrivilegedBrokerClient, namedPipeTransport, startPrivilegedPipeServer, windowsServiceOwnsPipeServer } from '../src/main/remoteApproval/privilegedService'
+import { formatPrivilegedHealthDiagnostic } from '../src/main/remoteApproval/privilegedHealthDiagnostic'
 
 const accounting = { commitTimerStart: async () => {}, listRecoverableTimerStarts: async () => [], acknowledgeTimerMaterialized: async () => {} }
 const authority = (membershipEpoch = 3, serviceEpoch = 7, authorityGeneration = 1) => ({ membershipEpoch, serviceEpoch, authorityGeneration })
@@ -283,6 +285,9 @@ describe('runtime remote approval broker', () => {
     try {
       const request = { capability: 'accounting', purpose: 'start-accounting', nonce: 'G'.repeat(16), operation: 'reserve', payload: { scope: accountingScope, receipt: 'receipt-runtime-0001:reserve', expectedVersion: 0, amountMs: 1 } }
       await expect(namedPipeTransport(pipe)(request)).resolves.toMatchObject({ scopes: expect.any(Object) })
+      const denied = { ...request, nonce: 'health-operation-denied', capability: 'operational', operation: 'health-check', payload: {} }
+      const deniedError = await namedPipeTransport(pipe)(denied).catch((error) => error)
+      expect(formatPrivilegedHealthDiagnostic(deniedError)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=service-operation code=OPERATION_DENIED\n')
       expect(PrivilegedApprovalService.loadAccounting(directory)).toMatchObject({ scopes: expect.any(Object) })
     } finally {
       await new Promise((resolve) => server.close(resolve))
@@ -334,11 +339,69 @@ describe('runtime remote approval broker', () => {
     const server = await startPrivilegedPipeServer(service)
     try {
       const request = { capability: 'accounting', purpose: 'start-accounting', nonce: 'S'.repeat(16), operation: 'read', payload: { scope: accountingScope } }
-      await expect(namedPipeTransport()(request)).rejects.toThrow('identity denied')
+      const error = await namedPipeTransport()(request).catch((cause) => cause)
+      expect(error).toMatchObject({ code: 'UNAVAILABLE' })
+      expect(formatPrivilegedHealthDiagnostic(error)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=scm-lineage code=SCM_LINEAGE_MISMATCH\n')
     } finally {
       await new Promise((resolve) => server.close(resolve))
       rmSync(directory, { recursive: true, force: true })
     }
+  })
+  ;(process.platform === 'win32' ? it : it.skip)('distinguishes server-side peer rejection from pipe-open and SCM-lineage failures', async () => {
+    const pipe = `${PRIVILEGED_PIPE}-peer-rejected-${process.pid}-${Date.now()}`
+    const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} })
+    const server = await startPrivilegedPipeServer(service, pipe, () => null)
+    try {
+      const client = new PrivilegedBrokerClient(namedPipeTransport(pipe, 1_000, false))
+      const error = await client.healthCheck().catch((cause) => cause)
+      expect(formatPrivilegedHealthDiagnostic(error)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=response-read code=RESPONSE_READ_FAILED\n')
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
+  })
+  ;(process.platform === 'win32' ? it : it.skip)('classifies malformed server framing independently of peer rejection', async () => {
+    const pipe = `${PRIVILEGED_PIPE}-malformed-${process.pid}-${Date.now()}`
+    const server = createServer((socket) => {
+      socket.once('data', () => socket.end(Buffer.from([0, 0, 0, 5, 0x7b, 0x7d])))
+    })
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(pipe, resolve)
+    })
+    try {
+      const client = new PrivilegedBrokerClient(namedPipeTransport(pipe, 1_000, false))
+      const error = await client.healthCheck().catch((cause) => cause)
+      expect(formatPrivilegedHealthDiagnostic(error)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=response-frame code=RESPONSE_FRAME_INVALID\n')
+    } finally {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    }
+  })
+  ;(process.platform === 'win32' ? it : it.skip)('rejects a valid privileged frame bound to the wrong request nonce', async () => {
+    const pipe = `${PRIVILEGED_PIPE}-wrong-nonce-${process.pid}-${Date.now()}`
+    const server = createServer((socket) => {
+      socket.once('data', () => {
+        const body = Buffer.from(JSON.stringify({ ok: true, nonce: 'wrong-nonce-value', result: 'ok' }))
+        const header = Buffer.alloc(4)
+        header.writeUInt32BE(body.length)
+        socket.end(Buffer.concat([header, body]))
+      })
+    })
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(pipe, resolve)
+    })
+    try {
+      const client = new PrivilegedBrokerClient(namedPipeTransport(pipe, 1_000, false))
+      const error = await client.healthCheck().catch((cause) => cause)
+      expect(formatPrivilegedHealthDiagnostic(error)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=response-binding code=RESPONSE_NONCE_MISMATCH\n')
+    } finally {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    }
+  })
+  it('rejects a successful transport result that violates the typed health response contract', async () => {
+    const client = new PrivilegedBrokerClient(async () => ({ status: 'healthy' }))
+    const error = await client.healthCheck().catch((cause) => cause)
+    expect(formatPrivilegedHealthDiagnostic(error)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=health-response code=HEALTH_RESPONSE_INVALID\n')
   })
   ;(process.platform === 'win32' ? it : it.skip)('keeps the native broker pipe first-instance exclusive', async () => {
     const pipe = `${PRIVILEGED_PIPE}-exclusive-${process.pid}-${Date.now()}`

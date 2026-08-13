@@ -8,6 +8,7 @@ import type { ProtectedAccountingHighWater, ProtectedAccountingScope, RemoteAppr
 import type { BrokerSignedProofOperations, RemoteApprovalOperation } from './apiClient'
 import type { TimerStartHandoff } from './startCoordinator'
 import { loadRemoteApprovalRuntimeConfigMetadata, type RemoteApprovalRuntimeConfig } from './runtimeBroker'
+import { classifyWindowsPipeOpenError, privilegedHealthFailure, type PrivilegedHealthCode } from './privilegedHealthDiagnostic'
 
 export const PRIVILEGED_PIPE = '\\\\.\\pipe\\PlaytimePactPrivilegedBroker-v1'
 const MAX_FRAME_BYTES = 64 * 1024
@@ -762,20 +763,22 @@ export function startPrivilegedPipeServer(service: PrivilegedApprovalService, pi
     server.listen(pipe, () => ok(server))
   })
 }
-function redactedCode(error: unknown): string | undefined {
+const REDACTED_CODES: readonly PrivilegedHealthCode[] = ['UNAVAILABLE', 'OFFLINE', 'EPOCH_MISMATCH', 'STALE_EPOCH', 'PERMISSION_DENIED', 'FORBIDDEN', 'AUTH_REQUIRED', 'DEPENDENCY_UNAVAILABLE', 'INVALID_RESPONSE', 'CONFIG_INVALID', 'CONFIG_UNREADABLE']
+function redactedCode(error: unknown): PrivilegedHealthCode | undefined {
   const code = typeof error === 'object' && error ? String((error as { code?: unknown }).code ?? '') : ''
-  return ['UNAVAILABLE', 'OFFLINE', 'EPOCH_MISMATCH', 'STALE_EPOCH', 'PERMISSION_DENIED', 'FORBIDDEN', 'AUTH_REQUIRED', 'DEPENDENCY_UNAVAILABLE', 'INVALID_RESPONSE', 'CONFIG_INVALID', 'CONFIG_UNREADABLE'].includes(code) ? code : undefined
+  return REDACTED_CODES.find((candidate) => candidate === code)
 }
 function serve(socket: Socket, service: PrivilegedApprovalService, peer: string): void { let data = Buffer.alloc(0); socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy()); socket.on('data', (part: Buffer) => { data = Buffer.concat([data, part]); if (data.length < 4) return; const size = data.readUInt32BE(0); if (size > MAX_FRAME_BYTES || data.length !== size + 4) return socket.destroy(); try { const request = JSON.parse(data.subarray(4).toString()) as PrivilegedRequest; void service.invoke(request, peer).then((result) => socket.end(frame({ ok: true, nonce: request.nonce, result })), (error) => socket.end(frame({ ok: false, nonce: request.nonce, code: redactedCode(error) }))) } catch { socket.destroy() } }) }
 function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServiceIdentity: boolean) {
   return (request: PrivilegedRequest) => new Promise<unknown>((ok, bad) => {
     if (!CreateFileW || !WriteFile || !ReadFile || !CancelIoEx || !CloseHandle) {
-      bad(Object.assign(new Error('Native Windows named-pipe client unavailable'), { code: 'UNAVAILABLE' }))
+      bad(privilegedHealthFailure('client-init', 'NATIVE_API_UNAVAILABLE', 'Native Windows named-pipe client unavailable'))
       return
     }
     const handle = CreateFileW(pipe, 0xc0000000, 0, null, 3, 0, null)
     if (invalidWindowsHandle(handle)) {
-      bad(Object.assign(new Error('Protected named-pipe service unavailable'), { code: 'UNAVAILABLE' }))
+      const win32Error = GetLastError?.()
+      bad(privilegedHealthFailure('pipe-open', classifyWindowsPipeOpenError(win32Error), 'Protected named-pipe service unavailable'))
       return
     }
     let settled = false
@@ -794,14 +797,18 @@ function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServic
     const succeed = (value: unknown) => {
       if (close()) ok(value)
     }
-    timer = setTimeout(() => fail(Object.assign(new Error('Privileged service timeout'), { code: 'UNAVAILABLE' })), timeout)
+    timer = setTimeout(() => fail(privilegedHealthFailure('response-read', 'RESPONSE_TIMEOUT', 'Privileged service timeout')), timeout)
     const server = windowsProcessForPipe(handle, GetNamedPipeServerProcessId, process.execPath)
-    if (!server || (requireServiceIdentity && !windowsServiceOwnsPipeServer(windowsServiceIdentity(), {
+    if (!server) {
+      fail(privilegedHealthFailure('server-identity', 'SERVER_IDENTITY_UNAVAILABLE', 'Privileged service identity unavailable'))
+      return
+    }
+    if (requireServiceIdentity && !windowsServiceOwnsPipeServer(windowsServiceIdentity(), {
       processId: server.id,
       parentProcessId: windowsParentProcessId(server.id),
       image: server.image,
-    }, process.execPath))) {
-      fail(Object.assign(new Error('Privileged service identity denied'), { code: 'UNAVAILABLE' }))
+    }, process.execPath)) {
+      fail(privilegedHealthFailure('scm-lineage', 'SCM_LINEAGE_MISMATCH', 'Privileged service identity denied'))
       return
     }
     const output = frame(request)
@@ -809,7 +816,7 @@ function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServic
     WriteFile.async(handle, output, output.length, bytesWritten, null, (_writeError: unknown, writeOk: boolean) => {
       if (settled) return
       if (!writeOk || bytesWritten.readUInt32LE(0) !== output.length) {
-        fail(Object.assign(new Error('Privileged service write failed'), { code: 'UNAVAILABLE' }))
+        fail(privilegedHealthFailure('request-write', 'REQUEST_WRITE_FAILED', 'Privileged service write failed'))
         return
       }
       const input = Buffer.alloc(MAX_FRAME_BYTES + 4)
@@ -818,11 +825,19 @@ function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServic
         if (settled) return
         try {
           const length = bytesRead.readUInt32LE(0)
-          if (!readOk || length < 4 || length > input.length || input.readUInt32BE(0) !== length - 4) throw new Error('Malformed privileged response')
-          const response = JSON.parse(input.subarray(4, length).toString()) as { ok: boolean; nonce: string; result?: unknown; code?: string }
-          if (response.nonce !== request.nonce) throw new Error('Unbound privileged response')
+          if (!readOk) throw privilegedHealthFailure('response-read', 'RESPONSE_READ_FAILED', 'Privileged service read failed')
+          if (length < 4 || length > input.length || input.readUInt32BE(0) !== length - 4) {
+            throw privilegedHealthFailure('response-frame', 'RESPONSE_FRAME_INVALID', 'Malformed privileged response')
+          }
+          let response: { ok: boolean; nonce: string; result?: unknown; code?: string }
+          try {
+            response = JSON.parse(input.subarray(4, length).toString()) as typeof response
+          } catch {
+            throw privilegedHealthFailure('response-frame', 'RESPONSE_FRAME_INVALID', 'Malformed privileged response')
+          }
+          if (response.nonce !== request.nonce) throw privilegedHealthFailure('response-binding', 'RESPONSE_NONCE_MISMATCH', 'Unbound privileged response')
           if (response.ok) succeed(response.result)
-          else fail(response.code ? Object.assign(new Error(response.code), { code: response.code }) : new Error('Privileged service denied'))
+          else fail(privilegedHealthFailure('service-operation', redactedCode({ code: response.code }) ?? 'OPERATION_DENIED', 'Privileged service denied', response.code ?? 'UNAVAILABLE'))
         } catch (error) {
           fail(error)
         }
@@ -838,23 +853,28 @@ export function namedPipeTransport(pipe = PRIVILEGED_PIPE, timeout = REQUEST_TIM
     let data = Buffer.alloc(0)
     const timer = setTimeout(() => {
       socket.destroy()
-      bad(Object.assign(new Error('Privileged service timeout'), { code: 'UNAVAILABLE' }))
+      bad(privilegedHealthFailure('response-read', 'RESPONSE_TIMEOUT', 'Privileged service timeout'))
     }, timeout)
-    socket.once('error', (error) => {
+    socket.once('error', () => {
       clearTimeout(timer)
-      bad(Object.assign(error, { code: 'UNAVAILABLE' }))
+      bad(privilegedHealthFailure('pipe-open', 'PIPE_UNAVAILABLE', 'Protected named-pipe service unavailable'))
     })
     socket.on('data', (part: Buffer) => {
       data = Buffer.concat([data, part])
       if (data.length < 4) return
       try {
         const size = data.readUInt32BE(0)
-        if (size > MAX_FRAME_BYTES || data.length !== size + 4) throw new Error('Malformed privileged response')
-        const response = JSON.parse(data.subarray(4).toString()) as { ok: boolean; nonce: string; result?: unknown; code?: string }
+        if (size > MAX_FRAME_BYTES || data.length !== size + 4) throw privilegedHealthFailure('response-frame', 'RESPONSE_FRAME_INVALID', 'Malformed privileged response')
+        let response: { ok: boolean; nonce: string; result?: unknown; code?: string }
+        try {
+          response = JSON.parse(data.subarray(4).toString()) as typeof response
+        } catch {
+          throw privilegedHealthFailure('response-frame', 'RESPONSE_FRAME_INVALID', 'Malformed privileged response')
+        }
         clearTimeout(timer)
-        if (response.nonce !== request.nonce) throw new Error('Unbound privileged response')
+        if (response.nonce !== request.nonce) throw privilegedHealthFailure('response-binding', 'RESPONSE_NONCE_MISMATCH', 'Unbound privileged response')
         if (response.ok) ok(response.result)
-        else bad(response.code ? Object.assign(new Error(response.code), { code: response.code }) : new Error('Privileged service denied'))
+        else bad(privilegedHealthFailure('service-operation', redactedCode({ code: response.code }) ?? 'OPERATION_DENIED', 'Privileged service denied', response.code ?? 'UNAVAILABLE'))
       } catch (error) {
         clearTimeout(timer)
         bad(error)
@@ -881,7 +901,7 @@ export class PrivilegedBrokerClient implements BrokerSignedProofOperations {
   }
   async healthCheck(): Promise<'ok'> {
     const result = await this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation: 'health-check', payload: {} })
-    if (result !== 'ok') throw new Error('Privileged service health response invalid')
+    if (result !== 'ok') throw privilegedHealthFailure('health-response', 'HEALTH_RESPONSE_INVALID', 'Privileged service health response invalid', 'INVALID_RESPONSE')
     return result
   }
   async readAccounting(scope: ProtectedAccountingScope): Promise<ProtectedAccountingHighWater> {
