@@ -1796,15 +1796,7 @@ if (privilegedConfigCheckMode) {
   }).catch(() => app.exit(1))
 } else if (privilegedHealthCheckMode) {
   app.whenReady().then(async () => {
-    await privilegedBroker.readAccounting({
-      householdId: 'health',
-      pcId: 'health',
-      gameId: 'health',
-      ianaTimeZone: 'UTC',
-      ianaDay: '1970-01-01',
-      allowanceVersion: 1,
-      totalMs: 0,
-    })
+    await privilegedBroker.healthCheck()
     app.exit(0)
   }).catch(() => app.exit(1))
 } else {

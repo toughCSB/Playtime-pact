@@ -419,6 +419,10 @@ export class PrivilegedApprovalService {
       if (request.capability !== 'operational' || !this.localPolicy) throw new Error('Protected local policy uninitialized')
       return { ...this.localPolicy }
     }
+    if (request.operation === 'health-check') {
+      if (request.capability !== 'accounting' || Object.keys(request.payload).length !== 0) throw new Error('Privileged service capability denied')
+      return 'ok'
+    }
     if (request.operation === 'list-recoverable-timer-starts') {
       if (request.capability !== 'accounting') throw new Error('Privileged service capability denied')
       return this.journal.filter((entry) => entry.operation === 'commit'
@@ -874,6 +878,11 @@ export class PrivilegedBrokerClient implements BrokerSignedProofOperations {
   async invoke<T>(input: { operation: RemoteApprovalOperation; payload: Record<string, unknown>; idempotencyKey: string }): Promise<T> {
     const membership = ['pair-parent', 'revoke-parent', 'reset-household', 'delete-household', 'reconcile-reset', 'reconcile-delete'].includes(input.operation)
     return this.transport({ capability: membership ? 'membership' : 'operational', purpose: membership ? 'membership-sync' : 'remote-approval', nonce: nonce(), adminSession: membership ? this.token : undefined, operation: input.operation, payload: { ...input.payload, __privilegedIdempotencyKey: input.idempotencyKey } }) as Promise<T>
+  }
+  async healthCheck(): Promise<'ok'> {
+    const result = await this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation: 'health-check', payload: {} })
+    if (result !== 'ok') throw new Error('Privileged service health response invalid')
+    return result
   }
   async readAccounting(scope: ProtectedAccountingScope): Promise<ProtectedAccountingHighWater> {
     const state = await this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation: 'read', payload: { scope } }) as AccountingState

@@ -227,6 +227,54 @@ describe('runtime remote approval broker', () => {
     await expect(service.invoke(request)).rejects.toThrow('replay')
     await expect(service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'B'.repeat(16), operation: 'update', payload: {} })).rejects.toThrow('capability')
   })
+  it('health-checks without reading or mutating protected broker state', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-health-check-'))
+    const policy = {
+      version: 1,
+      ianaTimeZone: 'UTC',
+      weekdayLimit: 20,
+      weekendLimit: 30,
+      weekdaySessionCount: 2,
+      weekendSessionCount: 2,
+      allowedStartHour: 8,
+      allowedEndHour: 22,
+      requireApprovalBeforeStart: true,
+    }
+    try {
+      const journalService = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} }, directory)
+      await journalService.invoke({
+        capability: 'accounting',
+        purpose: 'start-accounting',
+        nonce: 'health-baseline-01',
+        operation: 'reserve',
+        payload: { scope: accountingScope, receipt: 'health-baseline-0001:reserve', expectedVersion: 0, amountMs: 1 },
+      }, 'health-peer')
+      writeFileSync(join(directory, 'local-policy.json'), `${JSON.stringify(policy)}\n`)
+      const protectedAccounting = {
+        ...PrivilegedApprovalService.loadAccounting(directory),
+        globalFloor: { ianaDay: '2099-12-31', allowanceVersion: 99 },
+      }
+      const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), protectedAccounting, directory)
+      const client = new PrivilegedBrokerClient((request) => service.invoke(request, 'health-peer'))
+      const filesBefore = Object.fromEntries(readdirSync(directory).sort().map((name) => [name, readFileSync(join(directory, name))]))
+      const accountingBefore = structuredClone(protectedAccounting)
+      const policyBefore = PrivilegedApprovalService.loadLocalPolicy(directory)
+
+      await expect(client.healthCheck()).resolves.toBe('ok')
+      const replay = { capability: 'accounting', purpose: 'start-accounting', nonce: 'health-replay-001', operation: 'health-check', payload: {} }
+      await expect(service.invoke(replay, 'health-peer')).resolves.toBe('ok')
+      await expect(service.invoke(replay, 'health-peer')).rejects.toThrow('replay')
+      await expect(service.invoke({ ...replay, capability: 'operational', purpose: 'remote-approval', nonce: 'health-wrong-cap1' }, 'health-peer')).rejects.toThrow('capability')
+      await expect(service.invoke({ ...replay, purpose: 'remote-approval', nonce: 'health-wrong-purpose' }, 'health-peer')).rejects.toThrow('capability')
+
+      expect(protectedAccounting).toEqual(accountingBefore)
+      expect(PrivilegedApprovalService.loadLocalPolicy(directory)).toEqual(policyBefore)
+      expect(Object.fromEntries(readdirSync(directory).sort().map((name) => [name, readFileSync(join(directory, name))]))).toEqual(filesBefore)
+    } finally {
+      expect(removeTestPolicySelector(directory)).toBe(true)
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
   it('round-trips peer-validated framed requests and persists accounting CAS', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-privileged-'))
     const pipe = process.platform === 'win32' ? `${PRIVILEGED_PIPE}-test-${Date.now()}` : join(directory, 'broker.sock')
