@@ -2,7 +2,16 @@
   "name": "playtime-pact-remote-backend",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test ../tests/remoteApprovalBackend.test.mjs" },
-  "dependencies": { "jose": "6.2.8" },
-  "devDependencies": { "wrangler": "^3.0.0" }
+  "scripts": {
+    "test": "node --test ../tests/remoteApprovalBackend.test.mjs",
+    "config:render": "node scripts/render-config.mjs",
+    "config:validate": "node scripts/render-config.mjs --validate",
+    "schema:snapshot": "node scripts/generate-schema-snapshot.mjs",
+    "db:migrate": "node scripts/migrate.mjs",
+    "authority:bootstrap": "node scripts/bootstrap-authorities.mjs",
+    "authority:verify": "node scripts/bootstrap-authorities.mjs --verify",
+    "controls:get": "node scripts/control-permissions.mjs",
+    "controls:set": "node scripts/control-permissions.mjs --set"
+  },
+  "dependencies": { "jose": "6.2.8" }
 }

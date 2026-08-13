@@ -236,6 +236,45 @@ test('notification dispatch persists provider acknowledgement, deferred retry, a
     assert.deepEqual(await authority.dispatchNotifications(),{attempted:0,delivered:0,retried:0})
   } finally { h.db.close() }
 })
+test('invalid FCM device token is terminal and quarantined from later intents', async () => {
+  const h=createHarness()
+  try {
+    const authority=createD1Authority(h.db,{now:()=>h.now,fcmProtector:{async decrypt(){return 'invalid-device-token'}},notificationProvider:{async send(){throw Object.assign(new Error('invalid token'),{code:'FCM_DEVICE_TOKEN_INVALID',retryable:false})}}})
+    await h.call('/v1/households/setup',{householdId:'h',initialParentId:'parent',publicJwk:'{}'})
+    h.db.sqlite.prepare("INSERT INTO notification_intents VALUES('invalid-token-intent','h',NULL,'request-created','{}',?,NULL)").run(h.now)
+    h.db.sqlite.prepare("INSERT INTO fcm_tokens(id,household_id,parent_id,token_hash,token_ciphertext,token_version,status,created_at_ms,rotated_at_ms,revoked_at_ms,last_operation_key) VALUES('invalid-token','h','parent','hash','cipher',1,'active',?,NULL,NULL,'k')").run(h.now)
+
+    assert.deepEqual(await authority.dispatchNotifications(),{attempted:1,delivered:0,retried:0})
+    assert.equal(h.db.sqlite.prepare("SELECT state FROM notification_deliveries WHERE token_id='invalid-token'").get().state,'error')
+    assert.equal(h.db.sqlite.prepare("SELECT status FROM fcm_tokens WHERE id='invalid-token'").get().status,'quarantined')
+    h.db.sqlite.prepare("INSERT INTO notification_intents VALUES('later-intent','h',NULL,'request-created','{}',?,NULL)").run(h.now+1)
+    assert.deepEqual(await authority.dispatchNotifications(),{attempted:0,delivered:0,retried:0})
+  } finally { h.db.close() }
+})
+
+test('notification delivery failure preserves request and approval state across retry re-entry', async () => {
+  const h=createHarness()
+  try {
+    await h.call('/v1/households/setup',{householdId:'h',initialParentId:'parent',publicJwk:'{}'})
+    await h.call('/v1/pcs',{householdId:'h',pcId:'pc',publicKey:'{}'})
+    await h.call('/v1/allowances',{householdId:'h',pcId:'pc',gameId:'game',expectedVersion:0,totalSeconds:600})
+    const request={householdId:'h',requestId:'notify-state',pcId:'pc',gameId:'game',allowanceVersion:1,processId:'pid',processStartedAt:7}
+    await h.call('/v1/requests',request,{idempotencyKey:'request-notify-state'})
+    await h.call('/v1/fcm-tokens',{householdId:'h',token:'opaque-fcm-token-value-at-least-sixteen',tokenVersion:1},{idempotencyKey:'token-notify-state'})
+    const firstApproval=await h.call('/v1/approve',{householdId:'h',requestId:'notify-state',minutes:5},{idempotencyKey:'approve-notify-state'})
+    const authority=createD1Authority(h.db,{now:()=>h.now,fcmProtector:{async decrypt(){return 'provider-token'}},notificationProvider:{async send(){throw Object.assign(new Error('temporary'),{code:'PROVIDER_TRANSIENT',retryable:true})}}})
+
+    assert.deepEqual(await authority.dispatchNotifications(),{attempted:2,delivered:0,retried:2})
+    assert.deepEqual(await authority.dispatchNotifications(),{attempted:0,delivered:0,retried:0})
+    const replay=await h.call('/v1/approve',{householdId:'h',requestId:'notify-state',minutes:5},{idempotencyKey:'approve-notify-state'})
+
+    assert.deepEqual(replay.payload,firstApproval.payload)
+    assert.equal(h.db.sqlite.prepare("SELECT status FROM approval_requests WHERE id='notify-state'").get().status,'approved')
+    assert.equal(h.db.sqlite.prepare("SELECT COUNT(*) AS count FROM approval_grants WHERE request_id='notify-state'").get().count,1)
+    assert.equal(h.db.sqlite.prepare("SELECT COUNT(*) AS count FROM notification_intents WHERE request_id='notify-state' AND kind='grant-issued'").get().count,1)
+  } finally { h.db.close() }
+})
+
 test('notification dispatch exposes missing production dependencies', async () => {
   const h=createHarness()
   try {
@@ -614,6 +653,40 @@ test('delete reconciliation survives idempotency receipt loss for the original a
     assert.equal(finalWindow.payload.last_operation_key,'delete-loss')
   } finally { h.db.close() }
 })
+test('operator cleanup immediately purges only explicitly synthetic staging households', async () => {
+  const h=createHarness()
+  try {
+    const syntheticId='11111111-1111-4111-8111-111111111111'
+    const householdId=`household-staging-${syntheticId}`
+    await h.call('/v1/households/setup',{householdId,initialParentId:'parent',publicJwk:'{}'},{idempotencyKey:`synthetic:${syntheticId}`})
+    h.db.sqlite.prepare("INSERT INTO operator_authorities VALUES('staging-operator','{}','active',?)").run(h.now)
+    h.db.sqlite.prepare("INSERT INTO telemetry VALUES('synthetic-event',?,'event',?,'{}')").run(householdId,h.now)
+    h.db.sqlite.prepare("INSERT INTO rate_windows VALUES(?,?,1)").run('mutation:parent',1)
+    h.db.sqlite.prepare("INSERT INTO rate_windows VALUES(?,?,1)").run(`telemetry:${householdId}`,1)
+    const authority=createD1Authority(h.db,{now:()=>h.now})
+    const result=await authority.operatorPurgeSynthetic({householdId,actorId:'staging-operator',operationKey:'cleanup-1'})
+    assert.equal(result.purged,true)
+    assert.equal(h.db.sqlite.prepare('SELECT COUNT(*) AS count FROM households WHERE id=?').get(householdId).count,0)
+    assert.equal(h.db.sqlite.prepare('SELECT COUNT(*) AS count FROM parent_devices WHERE household_id=?').get(householdId).count,0)
+    assert.equal(h.db.sqlite.prepare('SELECT COUNT(*) AS count FROM telemetry WHERE household_id=?').get(householdId).count,0)
+    assert.equal(h.db.sqlite.prepare("SELECT COUNT(*) AS count FROM rate_windows WHERE scope IN('mutation:parent',?)").get(`telemetry:${householdId}`).count,0)
+    assert.equal(h.db.sqlite.prepare('SELECT COUNT(*) AS count FROM delete_tombstones WHERE household_id=?').get(householdId).count,1)
+    const replay=await authority.operatorPurgeSynthetic({householdId,actorId:'staging-operator',operationKey:'cleanup-retry'})
+    assert.equal(replay.purged,true);assert.equal(replay.operationKey,'cleanup-1')
+    const fcmSyntheticId='22222222-2222-4222-8222-222222222222'
+    const fcmHouseholdId=`household-fcm-${fcmSyntheticId}`
+    await h.call('/v1/households/setup',{householdId:fcmHouseholdId,initialParentId:'fcm-parent',publicJwk:'{}'},{idempotencyKey:`synthetic:${fcmSyntheticId}`})
+    const fcmResult=await authority.operatorPurgeSynthetic({householdId:fcmHouseholdId,actorId:'staging-operator',operationKey:'cleanup-fcm'})
+    assert.equal(fcmResult.purged,true)
+    const legitimateId='household-staging-33333333-3333-4333-8333-333333333333'
+    await h.call('/v1/households/setup',{householdId:legitimateId,initialParentId:'legitimate-parent',publicJwk:'{}'})
+    await assert.rejects(authority.operatorPurgeSynthetic({householdId:legitimateId,actorId:'staging-operator',operationKey:'cleanup-legitimate'}),/SYNTHETIC_CLEANUP_REQUIRED/)
+    assert.equal(h.db.sqlite.prepare('SELECT COUNT(*) AS count FROM households WHERE id=?').get(legitimateId).count,1)
+    await assert.rejects(authority.operatorPurgeSynthetic({householdId:'household-staging-33333333-3333-4333-8333-333333333333-extra',actorId:'staging-operator',operationKey:'cleanup-malformed'}),/SYNTHETIC_CLEANUP_REQUIRED/)
+    await assert.rejects(authority.operatorPurgeSynthetic({householdId:'production-family',actorId:'staging-operator',operationKey:'cleanup-2'}),/SYNTHETIC_CLEANUP_REQUIRED/)
+  } finally { h.db.close() }
+})
+
 test('bounded purge removes only due household personal data and tombstone prevents resurrection', async () => {
   const h=createHarness()
   try {

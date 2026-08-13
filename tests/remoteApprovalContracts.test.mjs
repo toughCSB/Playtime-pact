@@ -98,7 +98,10 @@ describe('remote approval contracts', () => {
       permission,
       membershipEpoch: 3,
       serviceEpoch: 4,
+      authorityGeneration: 2,
+      issuedAt: requestedAt,
       expiresAt: requestedAt + REMOTE_APPROVAL_TTL_MS,
+      state: 'armed',
       claimed: false,
     }
     const mismatch = claimFirstMatchingProcess({
@@ -107,6 +110,15 @@ describe('remote approval contracts', () => {
       serverTime: requestedAt,
       membershipEpoch: 3,
       serviceEpoch: 4,
+      authorityGeneration: 2,
+    })
+    const staleGeneration = claimFirstMatchingProcess({
+      preauthorization,
+      permission,
+      serverTime: requestedAt,
+      membershipEpoch: 3,
+      serviceEpoch: 4,
+      authorityGeneration: 3,
     })
     const claim = claimFirstMatchingProcess({
       preauthorization,
@@ -114,6 +126,7 @@ describe('remote approval contracts', () => {
       serverTime: requestedAt,
       membershipEpoch: 3,
       serviceEpoch: 4,
+      authorityGeneration: 2,
     })
     const secondClaim = claimFirstMatchingProcess({
       preauthorization: claim.preauthorization,
@@ -121,9 +134,11 @@ describe('remote approval contracts', () => {
       serverTime: requestedAt,
       membershipEpoch: 3,
       serviceEpoch: 4,
+      authorityGeneration: 2,
     })
 
     expect(mismatch.claimed).toBe(false)
+    expect(staleGeneration.claimed).toBe(false)
     expect(preauthorization.claimed).toBe(false)
     expect(claim.claimed).toBe(true)
     expect(claim.preauthorization.claimed).toBe(true)
@@ -135,14 +150,17 @@ describe('remote approval contracts', () => {
       permission: { ...permission, processId: 'pending-relaunch', processStartedAt: requestedAt },
       membershipEpoch: 3,
       serviceEpoch: 4,
+      authorityGeneration: 2,
+      issuedAt: requestedAt,
       expiresAt: requestedAt + REMOTE_APPROVAL_TTL_MS,
+      state: 'armed',
       claimed: false,
       bindFirstProcess: true,
     }
     const relaunched = { ...permission, processId: 'relaunched-process', processStartedAt: requestedAt + 100 }
-    const claim = claimFirstMatchingProcess({ preauthorization, permission: relaunched, serverTime: requestedAt + 100, membershipEpoch: 3, serviceEpoch: 4 })
+    const claim = claimFirstMatchingProcess({ preauthorization, permission: relaunched, serverTime: requestedAt + 100, membershipEpoch: 3, serviceEpoch: 4, authorityGeneration: 2 })
     expect(claim.claimed).toBe(true)
     expect(claim.preauthorization.permission).toEqual(relaunched)
-    expect(claimFirstMatchingProcess({ preauthorization: claim.preauthorization, permission: { ...relaunched, processId: 'second' }, serverTime: requestedAt + 101, membershipEpoch: 3, serviceEpoch: 4 }).claimed).toBe(false)
+    expect(claimFirstMatchingProcess({ preauthorization: claim.preauthorization, permission: { ...relaunched, processId: 'second' }, serverTime: requestedAt + 101, membershipEpoch: 3, serviceEpoch: 4, authorityGeneration: 2 }).claimed).toBe(false)
   })
 })

@@ -84,6 +84,7 @@ public final class MainActivity extends FragmentActivity {
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
+    FirebaseBootstrap.ensureInitialized(this);
     pairingStore = new PairingStore(this);
     showInitialScreen();
   }
@@ -360,7 +361,7 @@ public final class MainActivity extends FragmentActivity {
     catch (Exception error) { return false; }
   }
   private void syncForegroundToken() {
-    if(repository == null || !pairingStore.isPaired()) return;
+    if(!BuildConfig.FCM_ENABLED || repository == null || !pairingStore.isPaired()) return;
     ApprovalMessagingService.requestCurrentToken(this, new ApprovalMessagingService.TokenCallback() {
       @Override public void onToken(ApprovalMessagingService.TokenState token) {
         if(repository != null) repository.registerFcmToken(token.token, token.version, new ApprovalRepository.Callback<Void>() {
@@ -374,7 +375,7 @@ public final class MainActivity extends FragmentActivity {
   private View updateCard() {
     LinearLayout card = card();
     card.addView(text("앱 업데이트", 18, true));
-    if (!UpdateVerifier.isConfigured(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY)) {
+    if (!UpdateVerifier.isConfigured(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_PUBLIC_KEY_B64)) {
       card.addView(text("이 빌드에는 서명된 업데이트 채널이 구성되지 않았습니다.", 13, false));
       Button unavailable = secondaryButton("업데이트 확인 사용할 수 없음");
       unavailable.setEnabled(false);
@@ -388,7 +389,7 @@ public final class MainActivity extends FragmentActivity {
     return card;
   }
   private void checkForUpdate() {
-    if (!UpdateVerifier.isConfigured(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY)) {
+    if (!UpdateVerifier.isConfigured(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_PUBLIC_KEY_B64)) {
       toast("이 빌드에는 서명된 업데이트 채널이 구성되지 않았습니다.");
       return;
     }
@@ -396,7 +397,7 @@ public final class MainActivity extends FragmentActivity {
     pairingWorker.execute(() -> {
       try {
         long installed = getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode();
-        UpdateVerifier.VerifiedUpdate update = UpdateVerifier.fetchManifest(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY, installed);
+        UpdateVerifier.VerifiedUpdate update = UpdateVerifier.fetchManifest(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_PUBLIC_KEY_B64, installed);
         UpdateVerifier.persistMinimumSupportedVersion(this, update);
         runOnUiThread(() -> new AlertDialog.Builder(this)
             .setTitle("업데이트 " + update.versionName)
@@ -410,10 +411,10 @@ public final class MainActivity extends FragmentActivity {
     });
   }
   private void refreshSignedUpdatePolicy() {
-    if (!UpdateVerifier.isConfigured(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY)) return;
+    if (!UpdateVerifier.isConfigured(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_PUBLIC_KEY_B64)) return;
     UpdateVerifier.beginForegroundPolicyRefresh(this);
     pairingWorker.execute(() -> {
-      try { UpdateVerifier.persistMinimumSupportedVersion(this, UpdateVerifier.fetchPolicy(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY)); }
+      try { UpdateVerifier.persistMinimumSupportedVersion(this, UpdateVerifier.fetchPolicy(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_PUBLIC_KEY_B64)); }
       catch (Exception ignored) { /* A previously verified policy remains valid; unknown policy blocks mutations offline. */ }
       finally { UpdateVerifier.endForegroundPolicyRefresh(this); }
     });
@@ -565,6 +566,7 @@ public final class MainActivity extends FragmentActivity {
     }
   }
   private void requestNotificationPermission() {
+    if (!BuildConfig.FCM_ENABLED) return;
     if (Build.VERSION.SDK_INT >= 33
         && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
       requestPermissions(

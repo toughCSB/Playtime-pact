@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { isAbsolute, join } from 'node:path'
 
 const packageJson = JSON.parse(readFileSync('package.json', 'utf8'))
 const installerScript = readFileSync('build/installer.nsh', 'utf8')
@@ -10,6 +11,7 @@ const signatureVerifier = readFileSync('scripts/verify-win-signature.mjs', 'utf8
 const signingGate = readFileSync('scripts/ensure-win-signing-configured.mjs', 'utf8')
 const builderConfig = readFileSync('electron-builder.config.cjs', 'utf8')
 const packagedExePath = 'dist/win-unpacked/Playtime Pact.exe'
+const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 
 describe('packaged Playtime Pact identity surfaces', () => {
   it('keeps package metadata on the Playtime Pact identity', () => {
@@ -64,12 +66,15 @@ describe('packaged Playtime Pact identity surfaces', () => {
   it('validates packaged Windows executable metadata when the artifact exists', () => {
     if (process.platform !== 'win32' || !existsSync(packagedExePath)) return
 
+    expect(isAbsolute(powershell)).toBe(true)
+    expect(existsSync(powershell)).toBe(true)
+
     const script = [
       "$p=(Resolve-Path 'dist/win-unpacked/Playtime Pact.exe').Path",
       "$v=(Get-Item -LiteralPath $p).VersionInfo",
       "[pscustomobject]@{ ProductName=$v.ProductName; FileDescription=$v.FileDescription; InternalName=$v.InternalName; OriginalFilename=$v.OriginalFilename } | ConvertTo-Json -Compress",
     ].join('; ')
-    const raw = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    const raw = execFileSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       encoding: 'utf8',
       windowsHide: true,
     }).trim()
@@ -98,6 +103,9 @@ describe('packaged Playtime Pact identity surfaces', () => {
     expect(installerScript).toContain("ExecWait 'taskkill /F /IM \"MyPact.exe\" /T'")
     expect(installerScript).toContain("@('My Pact.exe','My Pact for My Future.exe','MyPact.exe')")
     expect(installerScript).toContain('PlaytimePactPrivilegedBroker.exe" install')
+    expect(installerScript).toContain('<domain>NT AUTHORITY</domain>')
+    expect(installerScript).toContain('<user>SYSTEM</user>')
+    expect(installerScript).not.toContain('<user>LocalSystem</user>')
     expect(installerScript).toContain('PlaytimePactPrivilegedBroker.exe" start')
     expect(installerScript).toContain('--privileged-broker-health-check')
     expect(installerScript).toContain('failed its IPC health check')

@@ -40,6 +40,10 @@ module.exports = {
       from: 'resources',
       to: 'resources',
     },
+    {
+      from: 'scripts/provision-remote-approval.ps1',
+      to: 'provisioning/provision-remote-approval.ps1',
+    },
   ],
   win: {
     target: [

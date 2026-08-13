@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isRemoteApprovalGrantActive, isRemoteApprovalRequestActive, REMOTE_APPROVAL_TTL_MS } from '../../shared/remoteApproval'
-import type { PairingSession, RemoteApprovalAllowance, RemoteApprovalGrant, RemoteApprovalHealth, RemoteApprovalRequest, RemoteApprovalState } from '../../shared/types'
+import type { PairingSession, RemoteApprovalAllowance, RemoteApprovalAuthoritySnapshot, RemoteApprovalGrant, RemoteApprovalHealth, RemoteApprovalRequest, RemoteApprovalState } from '../../shared/types'
 import { RemoteApprovalApiClient, RemoteApprovalClientError } from './apiClient'
+import { ServerClock } from './serverClock'
 
 type Membership = { householdId: string; pcId: string; membershipEpoch: number; serviceEpoch: number }
 type Listener = (state: RemoteApprovalState) => void
@@ -12,28 +13,47 @@ export class RemoteApprovalController {
   private membership: Membership | null = null
   private timer: ReturnType<typeof setInterval> | null = null
   private listeners = new Set<Listener>()
-  private serverOffsetMs: number | null = null
-  private lastServerNowMs = -Infinity
   private lastOnlineAt: number | undefined
   private localFallback = !this.client
-  private readonly intentPath = process.env.PLAYTIME_PACT_REMOTE_CONFIG ? `${process.env.PLAYTIME_PACT_REMOTE_CONFIG}.intent.json` : null
   private generation = 0
+  private authorityGeneration = 0
   private requestInFlight = 0
   private syncSequence = 0
   private intentReplay: Promise<void> | null = null
+  private invalidatedIntentKeys = new Set<string>()
 
   constructor(
     private readonly client: RemoteApprovalApiClient | null,
     private readonly pollMs = 10_000,
     private readonly now = () => Date.now(),
     private readonly onRequestAcknowledged?: (request: RemoteApprovalRequest) => void,
+    private readonly serverClock = new ServerClock(now),
+    /**
+     * Durable intent lives in the provisioned mutable state directory. Callers that have a
+     * protected configuration pass its `mutableStateDir` path; the legacy env-var location
+     * remains the fallback for unprovisioned developer runs.
+     */
+    private readonly intentPath: string | null = process.env.PLAYTIME_PACT_REMOTE_CONFIG ? `${process.env.PLAYTIME_PACT_REMOTE_CONFIG}.intent.json` : null,
   ) {
     void this.replayDurableIntent()
   }
 
   subscribe(listener: Listener): () => void { this.listeners.add(listener); listener(this.getState()); return () => this.listeners.delete(listener) }
   getState(): RemoteApprovalState { return { ...this.state, request: this.state.request && { ...this.state.request }, grant: this.state.grant && { ...this.state.grant }, parentDevices: this.state.parentDevices?.map((device) => ({ ...device })) } }
+  getAuthoritySnapshot(): RemoteApprovalAuthoritySnapshot | null {
+    if (!this.membership) return null
+    return Object.freeze({
+      membershipEpoch: this.membership.membershipEpoch,
+      serviceEpoch: this.membership.serviceEpoch,
+      authorityGeneration: this.authorityGeneration,
+    })
+  }
   configureMembership(membership: Membership | null): void {
+    const changed = this.membership?.householdId !== membership?.householdId
+      || this.membership?.pcId !== membership?.pcId
+      || this.membership?.membershipEpoch !== membership?.membershipEpoch
+      || this.membership?.serviceEpoch !== membership?.serviceEpoch
+    if (changed) this.invalidateAuthority()
     this.membership = membership
     this.setState(membership ? { lifecycle: this.client ? 'connecting' : 'offline', ...membership } : { lifecycle: 'offline' })
   }
@@ -45,18 +65,24 @@ export class RemoteApprovalController {
     for (const listener of this.listeners) listener(this.getState())
   }
   private idempotency(operation: string): string { return `${operation}:${randomUUID()}` }
+  private invalidateAuthority(intentKey?: string): void {
+    if (intentKey && this.invalidatedIntentKeys.has(intentKey)) return
+    if (intentKey) this.invalidatedIntentKeys.add(intentKey)
+    this.authorityGeneration++
+    this.generation++
+    this.syncSequence++
+    this.serverClock.invalidate()
+  }
   private acceptServerNow(serverNowMs: number): number {
-    if (!Number.isFinite(serverNowMs) || serverNowMs < this.lastServerNowMs) throw new RemoteApprovalClientError('invalid-response')
-    const offset = serverNowMs - this.now()
-    if (!Number.isFinite(offset) || Math.abs(offset) > 300_000) throw new RemoteApprovalClientError('invalid-response')
-    this.serverOffsetMs = offset
-    this.lastServerNowMs = serverNowMs
-    return serverNowMs
+    try { return this.serverClock.accept(serverNowMs) } catch { throw new RemoteApprovalClientError('invalid-response') }
   }
   authoritativeNow(): number | null {
-    if (this.serverOffsetMs === null) return null
-    const value = this.now() + this.serverOffsetMs
-    return Number.isFinite(value) && value >= this.lastServerNowMs ? value : null
+    const value = this.serverClock.authoritativeNow()
+    if (value === null && this.membership && ['online', 'request-pending', 'approved'].includes(this.state.lifecycle)) {
+      this.localFallback = true
+      this.setState({ lifecycle: 'offline', ...this.membership })
+    }
+    return value
   }
   private validAllowance(value: unknown, pcId: string): RemoteApprovalAllowance | undefined {
     const allowance = value as Partial<RemoteApprovalAllowance> | undefined
@@ -68,7 +94,11 @@ export class RemoteApprovalController {
       ? allowance as RemoteApprovalAllowance : undefined
   }
   private requireMembership(): Membership { if (!this.membership) throw new RemoteApprovalClientError('offline'); return this.membership }
-  allowsLocalFallback(): boolean { return !this.hasIntentFile() && this.localFallback }
+  allowsLocalFallback(): boolean {
+    return !this.hasIntentFile()
+      && this.state.lifecycle !== 'connecting'
+      && this.localFallback
+  }
   isRecoveryInProgress(): boolean { return this.hasIntentFile() }
 
   private hasIntentFile(): boolean { return Boolean(this.intentPath && existsSync(this.intentPath)) }
@@ -85,8 +115,7 @@ export class RemoteApprovalController {
     const temporary = `${this.intentPath}.${process.pid}.tmp`
     writeFileSync(temporary, `${JSON.stringify(intent)}\n`, { encoding: 'utf8', mode: 0o600 })
     renameSync(temporary, this.intentPath)
-    this.generation++
-    this.syncSequence++
+    this.invalidateAuthority(intent.idempotencyKey)
     this.localFallback = false
     this.setState({ lifecycle: 'error', ...intent.membership })
   }
@@ -103,6 +132,7 @@ export class RemoteApprovalController {
   }
   private replayDurableIntent(): Promise<void> {
     if (this.intentReplay) return this.intentReplay
+    if (!this.client || !this.readIntent()) return Promise.resolve()
     const replay = this.performDurableIntentReplay().finally(() => {
       if (this.intentReplay === replay) this.intentReplay = null
     })
@@ -112,6 +142,7 @@ export class RemoteApprovalController {
   private async performDurableIntentReplay(): Promise<void> {
     const intent = this.readIntent()
     if (!intent || !this.client) return
+    this.invalidateAuthority(intent.idempotencyKey)
     try {
       if (intent.operation === 'delete') {
         try {
@@ -124,7 +155,8 @@ export class RemoteApprovalController {
         this.client.persistDisable()
         this.clearIntent()
         this.stopPolling()
-        this.configureMembership(null)
+        this.membership = null
+        this.setState({ lifecycle: 'offline' })
       } else {
         let epochs: { membershipEpoch: number; serviceEpoch: number }
         try {
@@ -152,15 +184,16 @@ export class RemoteApprovalController {
     this.requestInFlight++
     try {
       const created = await this.client.createRequest(request, this.idempotency('create-request'))
+      if (generation !== this.generation || this.hasIntentFile()) throw new RemoteApprovalClientError('failed')
       const serverNow = this.acceptServerNow(created.requestedAt)
       if (!isRemoteApprovalRequestActive(created, serverNow, membership.membershipEpoch, membership.serviceEpoch)) throw new RemoteApprovalClientError('epoch-mismatch')
-      if (generation !== this.generation) throw new RemoteApprovalClientError('failed')
       this.localFallback = false
       this.onRequestAcknowledged?.(created)
       this.setState({ lifecycle: 'request-pending', ...membership, request: created })
       return created
     } catch (error) {
       if (generation === this.generation) {
+        this.serverClock.invalidate()
         this.localFallback = error instanceof RemoteApprovalClientError && ['offline', 'unavailable'].includes(error.code)
         this.setState({ lifecycle: this.localFallback ? 'offline' : 'error', ...membership })
       }
@@ -183,15 +216,16 @@ export class RemoteApprovalController {
     if (!this.client) return this.getState()
     try {
       const status = await this.client.readStatus({ ...membership, idempotencyKey: this.idempotency('read-status') })
+      if (this.hasIntentFile() || generation !== this.generation || sequence !== this.syncSequence || startedDuringRequest || this.requestInFlight > 0) return this.getState()
       const serverNow = this.acceptServerNow(status.serverNowMs)
       this.lastOnlineAt = serverNow
       this.localFallback = false
       const grant = status.grant && isRemoteApprovalGrantActive(status.grant, serverNow, membership.membershipEpoch, membership.serviceEpoch) ? status.grant : undefined
       const request = status.request && isRemoteApprovalRequestActive(status.request, serverNow, membership.membershipEpoch, membership.serviceEpoch) ? status.request : undefined
-      if (this.hasIntentFile() || generation !== this.generation || sequence !== this.syncSequence || startedDuringRequest || this.requestInFlight > 0) return this.getState()
       this.setState({ lifecycle: grant ? 'approved' : request ? 'request-pending' : 'online', ...membership, request, grant, parentDevices: status.parentDevices, allowance: this.validAllowance(status.allowance, membership.pcId) })
     } catch (error) {
       if (this.hasIntentFile() || generation !== this.generation || sequence !== this.syncSequence || startedDuringRequest || this.requestInFlight > 0) return this.getState()
+      this.serverClock.invalidate()
       this.localFallback = error instanceof RemoteApprovalClientError && ['offline', 'unavailable'].includes(error.code)
       this.setState({ lifecycle: this.localFallback ? 'offline' : 'error', ...membership })
     }
@@ -199,6 +233,7 @@ export class RemoteApprovalController {
   }
 
   health(): RemoteApprovalHealth {
+    const checkedAt = this.authoritativeNow() ?? this.now()
     const lifecycle = this.state.lifecycle === 'offline'
       ? 'offline'
       : this.state.lifecycle === 'error'
@@ -206,7 +241,7 @@ export class RemoteApprovalController {
         : this.state.lifecycle === 'connecting'
           ? 'connecting'
           : 'online'
-    return { lifecycle, serviceEpoch: this.membership?.serviceEpoch ?? 1, checkedAt: this.authoritativeNow() ?? this.now(), lastOnlineAt: this.lastOnlineAt }
+    return { lifecycle, serviceEpoch: this.membership?.serviceEpoch ?? 1, checkedAt, lastOnlineAt: this.lastOnlineAt }
   }
   createPairingSession(): Promise<PairingSession & { uri: string }> { if (this.hasIntentFile()) throw new RemoteApprovalClientError('failed'); const m = this.requireMembership(); if (!this.client) throw new RemoteApprovalClientError('offline'); return this.client.createPairingSession({ ...m, idempotencyKey: this.idempotency('pair-parent') }) }
   revokeParent(parentDeviceId: string): Promise<void> { if (this.hasIntentFile()) throw new RemoteApprovalClientError('failed'); const m = this.requireMembership(); if (!this.client) throw new RemoteApprovalClientError('offline'); return this.client.revokeParent({ ...m, parentDeviceId, idempotencyKey: this.idempotency('revoke-parent') }) }

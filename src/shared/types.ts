@@ -89,6 +89,12 @@ export interface RemoteApprovalAllowance {
   reservedSeconds: number
 }
 
+export interface RemoteApprovalAuthoritySnapshot {
+  readonly membershipEpoch: number
+  readonly serviceEpoch: number
+  readonly authorityGeneration: number
+}
+
 export interface RemoteApprovalState {
   lifecycle: RemoteApprovalLifecycleState
   householdId?: string
@@ -134,7 +140,10 @@ export interface MemoryOnlyLocalPreauthorization {
   permission: RemoteApprovalPermissionTuple
   membershipEpoch: number
   serviceEpoch: number
+  authorityGeneration: number
+  issuedAt: number
   expiresAt: number
+  state: 'armed' | 'claimed'
   claimed: boolean
   bindFirstProcess?: boolean
 }
@@ -145,6 +154,7 @@ export interface FirstProcessClaimInput {
   serverTime: number
   membershipEpoch: number
   serviceEpoch: number
+  authorityGeneration: number
 }
 
 export interface FirstProcessClaimResult {
@@ -198,6 +208,7 @@ export interface TimerState {
   activeGameIds?: ManagedGameId[]
   presenceSpans?: GamePresenceSpan[]
   primarySelectionEvents?: PrimarySelectionEvent[]
+  startReceipt?: string
 }
 
 

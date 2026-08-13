@@ -23,7 +23,7 @@ export function createAuthenticator(db, { now = () => Date.now(), setupAuthority
       const untrusted = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(token.payload.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))))
       const path = new URL(canonicalUrl).pathname
       const setup = path === '/v1/households/setup'
-      const operator = path === '/v1/environment/controls' || path === '/v1/household/controls' || path === '/v1/controls'
+      const operator = path === '/v1/environment/controls' || path === '/v1/household/controls' || path === '/v1/controls' || path === '/v1/operator/staging-synthetic-cleanup'
       let keyRecord
       let principalKind
       if (setup) {
@@ -43,7 +43,11 @@ export function createAuthenticator(db, { now = () => Date.now(), setupAuthority
       if (!keyRecord) throw bad('Unknown or revoked signing device')
       let registered
       try { registered = JSON.parse(keyRecord.public_jwk) } catch { throw bad('Invalid registered public key') }
-      const { payload, protectedHeader } = await flattenedVerify(token, await importJWK(registered, 'ES256'), { algorithms: ['ES256'] })
+      let payload
+      let protectedHeader
+      try {
+        ({ payload, protectedHeader } = await flattenedVerify(token, await importJWK(registered, 'ES256'), { algorithms: ['ES256'] }))
+      } catch { throw bad('Invalid proof signature') }
       if (protectedHeader.alg !== 'ES256' || protectedHeader.typ !== 'remote-approval+jws' || stable(protectedHeader.jwk) !== stable(registered)) throw bad('Unsupported or unpinned proof key')
       const claims = JSON.parse(new TextDecoder().decode(payload))
       if (!claims.actorId || claims.actorId !== keyRecord.id || claims.htm !== method || claims.htu !== canonicalUrl || claims.contentDigest !== await contentDigest(body)) throw bad('Proof binding mismatch')

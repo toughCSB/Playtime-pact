@@ -1,14 +1,16 @@
 import { app, BrowserWindow, ipcMain, screen, Tray, nativeImage } from 'electron'
 import { join } from 'path'
 import { exec } from 'child_process'
+import { performance } from 'node:perf_hooks'
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { registerIpcHandlers } from './ipc'
 import { RemoteApprovalController } from './remoteApproval/controller'
+import { ServerClock } from './remoteApproval/serverClock'
 import { RemoteStartCoordinator } from './remoteApproval/startCoordinator'
 import { RemoteApprovalApiClient } from './remoteApproval/apiClient'
 import { PRIVILEGED_PIPE, PrivilegedApprovalService, PrivilegedBrokerClient, namedPipeTransport, startPrivilegedPipeServer, type ProtectedLocalPolicy } from './remoteApproval/privilegedService'
-import { loadRemoteApprovalRuntimeConfig, WindowsCngRemoteApprovalBroker } from './remoteApproval/runtimeBroker'
+import { loadRemoteApprovalRuntimeConfig, RemoteApprovalConfigError, remoteMutableStatePath, WindowsCngRemoteApprovalBroker, type RemoteApprovalRuntimeConfig } from './remoteApproval/runtimeBroker'
 import { requireAdminSession } from './adminAuth'
 import {
   readSettings, writeTimerState, clearTimerState, readTimerState,
@@ -34,7 +36,8 @@ import {
 
 const privilegedServiceMode = process.argv.includes('--privileged-broker-service')
 const privilegedHealthCheckMode = process.argv.includes('--privileged-broker-health-check')
-const hasSingleInstanceLock = privilegedServiceMode || privilegedHealthCheckMode || app.requestSingleInstanceLock()
+const privilegedConfigCheckMode = process.argv.includes('--privileged-broker-config-check')
+const hasSingleInstanceLock = privilegedServiceMode || privilegedHealthCheckMode || privilegedConfigCheckMode || app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) app.quit()
 
 let mainWindow: BrowserWindow | null = null
@@ -70,6 +73,7 @@ function broadcastTimerTick(remainingSeconds: number): void {
 
 let timerStart: number | null = null
 let timerLimitMs: number | null = null
+let timerStartReceipt: string | undefined
 let timerSessionStartTime = ''
 let timerLimitAtSession = 0
 let timerInterval: ReturnType<typeof setInterval> | null = null
@@ -106,11 +110,43 @@ type RemoteRelaunchFence = {
   claimedProcessId?: string
   claimedProcessStartedAt?: number
 }
-const REMOTE_RELAUNCH_FENCE_PATH = process.env.PLAYTIME_PACT_REMOTE_CONFIG
-  ? `${process.env.PLAYTIME_PACT_REMOTE_CONFIG}.relaunch-fence.json`
-  : join(app.getPath('userData'), 'remote-relaunch-fence.json')
+// Provisioned configuration is protected and read-only to this account; all mutable
+// runtime state goes to the separate per-user directory it declares.
+type ProvisionedRemoteConfigState =
+  | { config: RemoteApprovalRuntimeConfig | null; error: null }
+  | { config: null; error: RemoteApprovalConfigError }
+const provisionedRemoteConfigState: ProvisionedRemoteConfigState = (() => {
+  try {
+    return { config: loadRemoteApprovalRuntimeConfig(), error: null }
+  } catch (cause) {
+    const error = cause instanceof RemoteApprovalConfigError
+      ? cause
+      : new RemoteApprovalConfigError('CONFIG_UNREADABLE', process.env.PLAYTIME_PACT_REMOTE_CONFIG ?? 'protected discovery', cause)
+    return { config: null, error }
+  }
+})()
+const provisionedRemoteConfig = provisionedRemoteConfigState.config
+function bootstrapPrivilegedMembership(): Promise<RemoteApprovalRuntimeConfig['membership']> {
+  if (provisionedRemoteConfigState.error) return Promise.reject(provisionedRemoteConfigState.error)
+  return Promise.resolve(provisionedRemoteConfig
+    ? { ...provisionedRemoteConfig.membership }
+    : { householdId: 'local-only', pcId: 'local-pc', membershipEpoch: 1, serviceEpoch: 1 })
+}
+const REMOTE_RELAUNCH_FENCE_PATH = remoteMutableStatePath(provisionedRemoteConfig, 'relaunch-fence.json')
+  ?? (process.env.PLAYTIME_PACT_REMOTE_CONFIG
+    ? `${process.env.PLAYTIME_PACT_REMOTE_CONFIG}.relaunch-fence.json`
+    : join(app.getPath('userData'), 'remote-relaunch-fence.json'))
 let remoteRelaunchFence: RemoteRelaunchFence | null = loadRemoteRelaunchFence()
-const remoteApprovalController = new RemoteApprovalController(remoteApprovalClient, 10_000, () => Date.now(), persistRemoteRelaunchFenceForRequest)
+const remoteServerClock = new ServerClock()
+const remoteApprovalController = new RemoteApprovalController(
+  remoteApprovalClient,
+  10_000,
+  () => Date.now(),
+  persistRemoteRelaunchFenceForRequest,
+  remoteServerClock,
+  remoteMutableStatePath(provisionedRemoteConfig, 'intent.json')
+    ?? (process.env.PLAYTIME_PACT_REMOTE_CONFIG ? `${process.env.PLAYTIME_PACT_REMOTE_CONFIG}.intent.json` : null),
+)
 let blockedApprovalGameId: ManagedGameId | null = null
 let remoteRequestInFlight: Promise<unknown> | null = null
 let accountingIntegrityFault = true
@@ -129,19 +165,32 @@ const remoteStartCoordinator = new RemoteStartCoordinator(
         && String(process.pid) === permission.processId
         && process.processStartedAt === permission.processStartedAt)
   },
-  (approvedMinutes) => {
+  (approvedMinutes, receipt) => {
+    const persisted = readTimerState()
+    if ((timerStart !== null && timerStartReceipt === receipt) || persisted?.startReceipt === receipt) return true
     if (!mainWindow || timerStart !== null || remoteApprovalController.isRecoveryInProgress()) return false
     const snapshot = getManagedGameSnapshot()
     if (shouldBlockTimerStartWithoutSupportedGame(app.isPackaged, snapshot.activeGameIds.length > 0)) return false
-    blockedApprovalGameId = null
-    startTimer(mainWindow, approvedMinutes, {
-      primaryGameId: selectPrimaryManagedGame(snapshot.activeGameIds, managedGameLastDetectedAt, primaryManagedGameId) ?? snapshot.activeGameIds[0],
+    const startedAt = Date.now()
+    const primaryGameId = selectPrimaryManagedGame(snapshot.activeGameIds, managedGameLastDetectedAt, primaryManagedGameId) ?? snapshot.activeGameIds[0]
+    writeTimerState({
+      startTime: startedAt,
+      limitMs: Math.round(approvedMinutes * 60_000),
+      date: getLocalDateString(),
+      sessionStartTime: getLocalTimeString(),
+      limitAtSession: approvedMinutes,
+      primaryGameId,
       activeGameIds: snapshot.activeGameIds,
+      startReceipt: receipt,
     })
+    blockedApprovalGameId = null
+    startTimer(mainWindow, approvedMinutes, { primaryGameId, activeGameIds: snapshot.activeGameIds, startReceipt: receipt, startTime: startedAt })
     return true
   },
   privilegedBroker,
-  () => remoteApprovalController.authoritativeNow() ?? Date.now(),
+  () => remoteApprovalController.authoritativeNow(),
+  () => performance.timeOrigin + performance.now(),
+  () => remoteApprovalController.getAuthoritySnapshot(),
   (permission) => {
     if (permission.householdId === 'policy' || permission.householdId === 'local-outage') {
       return localPolicyScope(permission)
@@ -153,7 +202,13 @@ const remoteStartCoordinator = new RemoteStartCoordinator(
     throw new Error('Authoritative protected allowance scope unavailable')
   },
 )
+let observedAuthorityGeneration: number | null = null
 remoteApprovalController.subscribe((state) => {
+  const authorityGeneration = remoteApprovalController.getAuthoritySnapshot()?.authorityGeneration ?? null
+  if (authorityGeneration !== observedAuthorityGeneration) {
+    void remoteStartCoordinator.invalidateLocalPreauthorization('remote-authority-changed')
+    observedAuthorityGeneration = authorityGeneration
+  }
   mainWindow?.webContents.send('remote:state', state)
   if (adminWindow && !adminWindow.isDestroyed()) adminWindow.webContents.send('remote:state', state)
 })
@@ -437,25 +492,21 @@ async function approveNextSession(): Promise<boolean> {
   if (!gameId || !remoteApprovalController.allowsLocalFallback() || snapshot.activeGameIds.includes(gameId)) return false
   const issuedAt = Date.now()
   const remoteState = remoteApprovalController.getState()
-  const allowance = remoteState.allowance
-  const localOnly = remoteState.householdId === 'local-only' && remoteState.pcId === 'local-pc'
-  if (!remoteState.householdId || !remoteState.pcId || !remoteState.membershipEpoch || !remoteState.serviceEpoch) return false
-  if (!localOnly && (!allowance || allowance.pcId !== remoteState.pcId || allowance.gameId !== gameId)) return false
+  if (!remoteState.householdId || !remoteState.pcId || !remoteState.membershipEpoch || !remoteState.serviceEpoch || !protectedLocalPolicy) return false
   const permission: RemoteApprovalPermissionTuple = {
-    householdId: remoteState.householdId,
+    householdId: 'local-outage',
     requestId: `local-${gameId}-${issuedAt}`,
     pcId: remoteState.pcId,
     gameId,
-    allowanceVersion: localOnly ? 1 : allowance!.allowanceVersion,
+    // Local policy revisions do not mint new allowance; one stable local
+    // accounting epoch preserves usage high-water across policy edits.
+    allowanceVersion: 1,
     processId: 'first-fresh-process',
     processStartedAt: issuedAt,
   }
   try {
     await remoteStartCoordinator.issueLocalPreauthorization({
       permission,
-      membershipEpoch: remoteState.membershipEpoch,
-      serviceEpoch: remoteState.serviceEpoch,
-      expiresAt: issuedAt + 300000,
       bindFirstProcess: true,
     }, getTodaySessionCount().perSessionMinutes)
     return true
@@ -504,7 +555,7 @@ function localPolicyScope(permission: RemoteApprovalPermissionTuple): ProtectedA
     gameId: permission.gameId,
     ianaTimeZone,
     ianaDay,
-    allowanceVersion: 1,
+    allowanceVersion: permission.allowanceVersion,
     totalMs,
   }
 }
@@ -536,6 +587,7 @@ function pauseTimerInternals(): void {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null }
   timerStart = null
   timerLimitMs = null
+  timerStartReceipt = undefined
   timerSessionStartTime = ''
   timerLimitAtSession = 0
   warnedMinutes.clear()
@@ -546,10 +598,11 @@ function pauseTimerInternals(): void {
   centerPopupEpoch++
 }
 
-function stopTimerInternals(): void {
+function stopTimerInternals(clearPersistedState = true): void {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null }
   timerStart = null
   timerLimitMs = null
+  timerStartReceipt = undefined
   timerSessionStartTime = ''
   timerLimitAtSession = 0
   warnedMinutes.clear()
@@ -557,7 +610,7 @@ function stopTimerInternals(): void {
   timerUiMode = 'corner'
   timerDisplay = null
   resetQuotaWindowTracking()
-  safeClearTimerState()
+  if (clearPersistedState) safeClearTimerState()
   lastCornerOverlayBounds = null
   centerPopupEpoch++
 }
@@ -584,6 +637,7 @@ function persistPausedTimer(): void {
       activeGameIds: [...activeManagedGameIds],
       presenceSpans: [...quotaPresenceSpans],
       primarySelectionEvents: [...quotaPrimarySelectionEvents],
+      startReceipt: timerStartReceipt,
     })
   } else {
     safeClearTimerState()
@@ -663,7 +717,7 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
   }
 
   if (remoteApprovalController.isRecoveryInProgress()) {
-    remoteStartCoordinator.clearLocalPreauthorization()
+    void remoteStartCoordinator.invalidateLocalPreauthorization('remote-recovery-in-progress')
     enforceManagedGameBlock('approval-required', snapshot.activeGameIds[0])
     return false
   }
@@ -680,7 +734,8 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
   }
   const remoteState = remoteApprovalController.getState()
   const approvedGrant = remoteState.grant
-  if (approvedGrant && remoteState.membershipEpoch && remoteState.serviceEpoch && remoteRelaunchFence?.requestId === approvedGrant.requestId) {
+  const capturedAuthority = remoteApprovalController.getAuthoritySnapshot()
+  if (approvedGrant && capturedAuthority && remoteRelaunchFence?.requestId === approvedGrant.requestId) {
     if (remoteRelaunchFence.expiresAt !== approvedGrant.expiresAt) writeRemoteRelaunchFence({ ...remoteRelaunchFence, expiresAt: approvedGrant.expiresAt })
     const fence = remoteRelaunchFence
     const originalStillPresent = snapshot.classifiedProcesses.some((candidate) =>
@@ -704,8 +759,7 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
         void remoteStartCoordinator.consumeRemoteGrant(
           approvedGrant,
           process,
-          remoteState.membershipEpoch,
-          remoteState.serviceEpoch,
+          capturedAuthority,
         ).then((result) => {
           if (result === 'started') clearRemoteRelaunchFence()
           else if (result === 'denied' && timerStart === null) enforceManagedGameBlock('approval-required', process.gameId)
@@ -742,9 +796,6 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
   }
   void remoteStartCoordinator.consumeLocalPreauthorization(
     { gameId: process.gameId, processId: process.processId, processStartedAt: process.processStartedAt },
-    1,
-    1,
-    perSessionMinutes,
   ).then((started) => {
     if (!started && timerStart === null) enforceManagedGameBlock('approval-required', process.gameId)
   })
@@ -1027,7 +1078,7 @@ function adjustActiveTimer(deltaMinutes: number): number {
     currentSessionRemainingMs: nextRemainingMs,
   })
   const settings = readSettings()
-  if (settings.resumeTimerOnRestart) {
+  if (settings.resumeTimerOnRestart || timerStartReceipt) {
     safeWriteTimerState({
       startTime: timerStart,
       limitMs: timerLimitMs,
@@ -1038,6 +1089,7 @@ function adjustActiveTimer(deltaMinutes: number): number {
       activeGameIds: [...activeManagedGameIds],
       presenceSpans: [...quotaPresenceSpans],
       primarySelectionEvents: [...quotaPrimarySelectionEvents],
+      startReceipt: timerStartReceipt,
     })
   }
   broadcastTimerTick(Math.ceil(nextRemainingMs / 1000))
@@ -1052,13 +1104,15 @@ type StartTimerOptions = {
   activeGameIds?: ManagedGameId[]
   presenceSpans?: GamePresenceSpan[]
   primarySelectionEvents?: PrimarySelectionEvent[]
+  startReceipt?: string
+  startTime?: number
 }
 
 function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTimerOptions = {}): void {
   if (accountingIntegrityFault) {
     return
   }
-  stopTimerInternals()
+  stopTimerInternals(options.startReceipt === undefined)
 
   const cursor = screen.getCursorScreenPoint()
   timerDisplay = screen.getDisplayNearestPoint(cursor)
@@ -1066,13 +1120,14 @@ function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTime
 
   const limitMs = Math.round(limitMinutes * 60 * 1000)
   timerLimitMs = limitMs
+  timerStartReceipt = options.startReceipt
   timerSessionStartTime = options.sessionStartTime || getLocalTimeString()
   timerLimitAtSession = options.limitAtSession || limitMinutes
 
   if (options.resumeRemainingMs !== undefined) {
     timerStart = Date.now() - (limitMs - options.resumeRemainingMs)
   } else {
-    timerStart = Date.now()
+    timerStart = options.startTime ?? Date.now()
   }
 
   warnedMinutes.clear()
@@ -1101,7 +1156,7 @@ function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTime
   recordPrimarySelection(primaryManagedGameId ?? undefined, timelineAt)
 
   const settings = readSettings()
-  if (settings.resumeTimerOnRestart) {
+  if (settings.resumeTimerOnRestart || timerStartReceipt) {
     const today = getLocalDateString()
     safeWriteTimerState({
       startTime: timerStart,
@@ -1113,6 +1168,7 @@ function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTime
       activeGameIds: [...activeManagedGameIds],
       presenceSpans: [...quotaPresenceSpans],
       primarySelectionEvents: [...quotaPrimarySelectionEvents],
+      startReceipt: options.startReceipt,
     })
   }
 
@@ -1206,10 +1262,9 @@ function tryResumeTimer(): boolean {
   if (!win) return false
 
   const settings = readSettings()
-  if (!settings.resumeTimerOnRestart) return false
-
   const state = readTimerState()
   if (!state) return false
+  if (!settings.resumeTimerOnRestart && !state.startReceipt) return false
 
   const today = getLocalDateString()
   if (state.date !== today) {
@@ -1259,6 +1314,7 @@ function tryResumeTimer(): boolean {
       activeGameIds: [],
       presenceSpans: state.presenceSpans,
       primarySelectionEvents: state.primarySelectionEvents,
+      startReceipt: state.startReceipt,
     })
     return false
   }
@@ -1272,6 +1328,7 @@ function tryResumeTimer(): boolean {
     activeGameIds: snapshot.activeGameIds,
     presenceSpans: state.presenceSpans,
     primarySelectionEvents: state.primarySelectionEvents,
+    startReceipt: state.startReceipt,
   })
   win.webContents.send('timer:resumed', { remainingSeconds: Math.ceil(remaining / 1000) })
   return true
@@ -1578,8 +1635,9 @@ function createWindow(): void {
       return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'managed-game-not-running' }
     }
     const remoteState = remoteApprovalController.getState()
+    const capturedAuthority = remoteApprovalController.getAuthoritySnapshot()
     const fence = remoteRelaunchFence
-    if (remoteState.grant && remoteState.membershipEpoch && remoteState.serviceEpoch && fence?.requestId === remoteState.grant.requestId && fence.armed) {
+    if (remoteState.grant && capturedAuthority && fence?.requestId === remoteState.grant.requestId && fence.armed) {
       if (fence.expiresAt !== remoteState.grant.expiresAt) writeRemoteRelaunchFence({ ...fence, expiresAt: remoteState.grant.expiresAt })
       const trusted = getTrustedManagedProcess(snapshot, remoteState.grant.gameId as ManagedGameId)
       if (trusted && (trusted.processId !== fence.originalProcessId || trusted.processStartedAt !== fence.originalProcessStartedAt)
@@ -1588,8 +1646,7 @@ function createWindow(): void {
         void remoteStartCoordinator.consumeRemoteGrant(
           remoteState.grant,
           trusted,
-          remoteState.membershipEpoch,
-          remoteState.serviceEpoch,
+          capturedAuthority,
         ).then((result) => { if (result === 'started') clearRemoteRelaunchFence() })
       }
     } else if (protectedLocalPolicy && !shouldRequireApprovalForStart(protectedLocalPolicy, { hasActiveSession: false })) {
@@ -1600,9 +1657,6 @@ function createWindow(): void {
     } else {
       void remoteStartCoordinator.consumeLocalPreauthorization(
         { gameId: process.gameId, processId: String(process.pid), processStartedAt: startedAt },
-        1,
-        1,
-        limitMins,
       )
     }
     return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'approval-required' }
@@ -1703,17 +1757,29 @@ function createWindow(): void {
   })
 }
 
-if (privilegedServiceMode) {
+if (privilegedConfigCheckMode) {
+  app.whenReady().then(async () => {
+    try {
+      const membership = await bootstrapPrivilegedMembership()
+      process.stdout.write(`${JSON.stringify({ ok: true, membership })}\n`)
+      app.exit(0)
+    } catch (error) {
+      const code = error instanceof RemoteApprovalConfigError ? error.code : 'CONFIG_UNREADABLE'
+      process.stdout.write(`${JSON.stringify({ ok: false, code })}\n`)
+      app.exit(2)
+    }
+  }).catch(() => app.exit(2))
+} else if (privilegedServiceMode) {
   app.whenReady().then(async () => {
     const stateDir = 'C:\\ProgramData\\PlaytimePact\\Broker\\Accounting'
-    const config = loadRemoteApprovalRuntimeConfig()
-    const remote = config ? new WindowsCngRemoteApprovalBroker(config) : null
-    const unavailable = () => Promise.reject(Object.assign(new Error('Remote authority configuration unavailable'), { code: 'UNAVAILABLE' }))
+    const config = provisionedRemoteConfig
+    const configLoadError = provisionedRemoteConfigState.error
+    const remote = config ? new WindowsCngRemoteApprovalBroker(config, undefined, undefined, () => Date.now(), remoteServerClock) : null
+    const unavailable = () => Promise.reject(configLoadError
+      ?? Object.assign(new Error('Remote authority configuration unavailable'), { code: 'UNAVAILABLE' }))
     const hosted = new PrivilegedApprovalService(
       (operation, payload) => {
-        if (operation === 'bootstrap-membership') {
-          return Promise.resolve(config ? { ...config.membership } : { householdId: 'local-only', pcId: 'local-pc', membershipEpoch: 1, serviceEpoch: 1 })
-        }
+        if (operation === 'bootstrap-membership') return bootstrapPrivilegedMembership()
         if (!remote) return unavailable()
         const { __privilegedIdempotencyKey, ...body } = payload
         return remote.invoke({ operation: operation as never, payload: body, idempotencyKey: String(__privilegedIdempotencyKey ?? '') })
@@ -1803,10 +1869,14 @@ app.whenReady().then(async () => {
   createTray()
   startManagedGameDetection()
 
-  mainWindow?.webContents.once('did-finish-load', () => {
+  mainWindow?.webContents.once('did-finish-load', async () => {
     if (mainWindow && showQaOverlayEvidence(mainWindow)) return
+    try { await remoteStartCoordinator.recoverCommittedTimerStarts() } catch (error) {
+      accountingIntegrityFault = true
+      console.error('committed timer handoff recovery failed', error)
+    }
     setTimeout(() => {
-      const resumed = tryResumeTimer()
+      const resumed = timerStart !== null || tryResumeTimer()
       const action = decideStartupWindowAction({ startHidden, resumedTimer: resumed })
       if (action === 'show-main-window' && mainWindow) {
         restoreMainFullPageWindow(mainWindow)

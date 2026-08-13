@@ -1,6 +1,6 @@
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
-import { mkdirSync, readFileSync, writeFileSync, copyFileSync, existsSync, unlinkSync, renameSync } from 'fs'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, copyFileSync, existsSync, unlinkSync, renameSync } from 'fs'
 import { execFileSync } from 'child_process'
 import { createHash, createHmac, pbkdf2Sync, randomBytes, randomUUID, timingSafeEqual } from 'crypto'
 import type { DailyUsage, GamePresenceSpan, ManagedGameId, PrimarySelectionEvent, Session, Settings, TimerState } from '../shared/types'
@@ -469,6 +469,7 @@ export function readTimerState(): TimerState | null {
     if (parsed.limitAtSession !== undefined && (!isFinite(parsed.limitAtSession) || parsed.limitAtSession <= 0)) {
       delete parsed.limitAtSession
     }
+    if (parsed.startReceipt !== undefined && (typeof parsed.startReceipt !== 'string' || !/^[A-Za-z0-9._:-]{16,256}$/.test(parsed.startReceipt))) delete parsed.startReceipt
     parsed.primaryGameId = parsed.primaryGameId ? normalizeManagedGameId(parsed.primaryGameId) : undefined
     parsed.activeGameIds = normalizeManagedGameIds(parsed.activeGameIds)
     parsed.presenceSpans = normalizePresenceSpans(parsed.presenceSpans)
@@ -481,7 +482,13 @@ export function readTimerState(): TimerState | null {
 
 export function writeTimerState(state: TimerState): void {
   ensureDir()
-  atomicWrite(TIMER_STATE_PATH, JSON.stringify(state, null, 2))
+  const temporary = `${TIMER_STATE_PATH}.${process.pid}.tmp`
+  const handle = openSync(temporary, 'w', 0o600)
+  try { writeFileSync(handle, JSON.stringify(state, null, 2), 'utf8'); fsyncSync(handle) } finally { closeSync(handle) }
+  try { renameSync(temporary, TIMER_STATE_PATH) } catch (error) {
+    try { unlinkSync(temporary) } catch {}
+    throw error
+  }
 }
 
 export function clearTimerState(): void {

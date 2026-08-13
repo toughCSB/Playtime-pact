@@ -32,6 +32,7 @@ public final class UpdateVerifier {
   public static final long MAX_APK_BYTES = 200L * 1024L * 1024L;
   private static final String APPLICATION_ID = "com.playtimepact.parent";
   private static final int CONNECT_TIMEOUT_MS = 10_000, READ_TIMEOUT_MS = 30_000, MAX_MANIFEST_BYTES = 64 * 1024;
+  private static final String[] MANIFEST_FIELDS = { "applicationId", "versionCode", "minimumSupportedVersionCode", "versionName", "apkSha256", "sizeBytes", "apkUrl", "releaseNotes", "signerLineageSha256", "issuedAtMillis", "expiresAtMillis", "signature" };
 
   public static final class VerifiedUpdate {
     public final long versionCode, minimumSupportedVersion, sizeBytes, issuedAtMillis, expiresAtMillis;
@@ -54,16 +55,22 @@ public final class UpdateVerifier {
   public static VerifiedUpdate verifyManifest(String manifestJson, String pinnedPublicKeyBase64, long installedVersion) throws Exception {
     if (pinnedPublicKeyBase64 == null || pinnedPublicKeyBase64.trim().isEmpty()) throw new SecurityException("Update signing key is not configured");
     JSONObject input = new JSONObject(manifestJson);
+    requireExactFields(input);
     long version=input.getLong("versionCode"), minimum=input.getLong("minimumSupportedVersionCode"), size=input.getLong("sizeBytes"), issued=input.getLong("issuedAtMillis"), expires=input.getLong("expiresAtMillis");
     String applicationId=input.getString("applicationId"), name=input.getString("versionName"), url=input.getString("apkUrl"), sha=normalizeDigest(input.getString("apkSha256")), notes=input.getString("releaseNotes"), lineage=normalizeDigest(input.getString("signerLineageSha256")), signature=input.getString("signature");
     if (version <= installedVersion) throw new SecurityException("Update is not newer");
     if (minimum > version || minimum < 0) throw new SecurityException("Update metadata has an invalid supported version floor");
-    if (!APPLICATION_ID.equals(applicationId) || size <= 0 || size > MAX_APK_BYTES || issued < 0 || expires <= issued || expires <= System.currentTimeMillis() || name.trim().isEmpty() || notes.length() > 16_384 || !isHttps(url)) throw new SecurityException("Update metadata is invalid");
+    long now=System.currentTimeMillis();
+    if (!APPLICATION_ID.equals(applicationId) || size <= 0 || size > MAX_APK_BYTES || issued < 0 || issued > now || expires <= issued || expires <= now || name.trim().isEmpty() || notes.length() > 16_384 || !isHttps(url)) throw new SecurityException("Update metadata is invalid");
     PublicKey key=KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(Base64.decode(pinnedPublicKeyBase64, Base64.DEFAULT)));
     String canonical=applicationId+"\n"+version+"\n"+minimum+"\n"+name+"\n"+sha+"\n"+size+"\n"+url+"\n"+notes+"\n"+lineage+"\n"+issued+"\n"+expires;
     java.security.Signature verifier=java.security.Signature.getInstance("SHA256withECDSA"); verifier.initVerify(key); verifier.update(canonical.getBytes(StandardCharsets.UTF_8));
     if (!verifier.verify(Base64.decode(signature, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING))) throw new SecurityException("Update manifest signature is invalid");
     return new VerifiedUpdate(version,minimum,name,url,sha,size,notes,lineage,issued,expires);
+  }
+  private static void requireExactFields(JSONObject input) throws SecurityException {
+    if (input.length() != MANIFEST_FIELDS.length) throw new SecurityException("Update metadata has unexpected fields");
+    for (String field : MANIFEST_FIELDS) if (!input.has(field)) throw new SecurityException("Update metadata has unexpected fields");
   }
   public static void persistMinimumSupportedVersion(Context context, VerifiedUpdate update) {
     SharedPreferences preferences = context.getApplicationContext().getSharedPreferences("playtimepact.signed-update", Context.MODE_PRIVATE);

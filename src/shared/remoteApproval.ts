@@ -2,6 +2,7 @@ import type {
   FirstProcessClaimInput,
   FirstProcessClaimResult,
   MemoryOnlyLocalPreauthorization,
+  RemoteApprovalAuthoritySnapshot,
   RemoteApprovalGrant,
   RemoteApprovalPermissionTuple,
   RemoteApprovalRequest,
@@ -70,6 +71,16 @@ export function remoteApprovalEpochsMatch(
     && isPositiveEpoch(serviceEpoch)
     && membershipEpoch === expectedMembershipEpoch
     && serviceEpoch === expectedServiceEpoch
+}
+
+export function remoteApprovalAuthoritySnapshotsMatch(
+  left: RemoteApprovalAuthoritySnapshot | null | undefined,
+  right: RemoteApprovalAuthoritySnapshot | null | undefined,
+): boolean {
+  if (!left || !right) return false
+  return left.membershipEpoch === right.membershipEpoch
+    && left.serviceEpoch === right.serviceEpoch
+    && left.authorityGeneration === right.authorityGeneration
 }
 
 export function isRemoteApprovalRequest(value: unknown): value is RemoteApprovalRequest {
@@ -160,8 +171,9 @@ export function shouldAutomaticallyLaunchRemoteApprovedGame(): false {
 }
 
 export function claimFirstMatchingProcess(input: FirstProcessClaimInput): FirstProcessClaimResult {
-  const { preauthorization, permission, serverTime, membershipEpoch, serviceEpoch } = input
+  const { preauthorization, permission, serverTime, membershipEpoch, serviceEpoch, authorityGeneration } = input
   const canClaim = !preauthorization.claimed
+    && preauthorization.state !== 'claimed'
     && isRemoteApprovalPermissionTuple(preauthorization.permission)
     && (preauthorization.bindFirstProcess
       ? remoteApprovalScopeMatches(preauthorization.permission, permission)
@@ -172,6 +184,8 @@ export function claimFirstMatchingProcess(input: FirstProcessClaimInput): FirstP
       membershipEpoch,
       serviceEpoch,
     )
+    && Number.isInteger(preauthorization.authorityGeneration)
+    && preauthorization.authorityGeneration === authorityGeneration
     && isFiniteTimestamp(serverTime)
     && serverTime < preauthorization.expiresAt
 
@@ -182,6 +196,7 @@ export function claimFirstMatchingProcess(input: FirstProcessClaimInput): FirstP
   const claimedPreauthorization: MemoryOnlyLocalPreauthorization = {
     ...preauthorization,
     permission: preauthorization.bindFirstProcess ? { ...permission } : preauthorization.permission,
+    state: 'claimed',
     claimed: true,
   }
   return { claimed: true, preauthorization: claimedPreauthorization }

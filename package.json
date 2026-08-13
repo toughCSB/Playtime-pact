@@ -7,12 +7,23 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run --exclude tests/remoteApprovalBackend.test.mjs --exclude tests/remoteApprovalD1.test.mjs && node --test tests/remoteApprovalBackend.test.mjs tests/remoteApprovalD1.test.mjs",
+    "test": "vitest run --exclude tests/remoteApprovalBackend.test.mjs --exclude tests/remoteApprovalD1.test.mjs --exclude tests/remoteBackendMigrations.test.mjs --exclude tests/remoteBackendConfig.test.mjs --exclude tests/remoteBackendAuthority.test.mjs --exclude tests/remoteBackendControls.test.mjs --exclude tests/androidUpdateTooling.test.mjs --exclude tests/fcmProvider.test.mjs --exclude tests/remoteApprovalLifecycleE2E.test.mjs && node --test --test-concurrency=1 tests/remoteApprovalBackend.test.mjs tests/remoteApprovalD1.test.mjs tests/remoteBackendMigrations.test.mjs tests/remoteBackendConfig.test.mjs tests/remoteBackendAuthority.test.mjs tests/remoteBackendControls.test.mjs tests/androidUpdateTooling.test.mjs tests/fcmProvider.test.mjs tests/remoteApprovalLifecycleE2E.test.mjs",
     "package:win": "npm run package:win:signed",
     "package:win:unsigned": "electron-vite build && electron-builder --win --x64 --config electron-builder.config.cjs --config.win.forceCodeSigning=false --publish never",
     "package:win:signed": "node scripts/ensure-win-signing-configured.mjs && electron-vite build && electron-builder --win --x64 --config electron-builder.config.cjs --publish never && node scripts/verify-win-signature.mjs",
     "verify:win-signature": "node scripts/verify-win-signature.mjs",
-    "package:mac": "electron-vite build && electron-builder --mac"
+    "update:sign": "node scripts/sign-android-update.mjs",
+    "update:verify": "node scripts/verify-android-update.mjs",
+    "remote:config:render": "npm --prefix remote-backend run config:render --",
+    "remote:config:validate": "npm --prefix remote-backend run config:validate --",
+    "remote:db:migrate": "npm --prefix remote-backend run db:migrate --",
+    "remote:authority:bootstrap": "npm --prefix remote-backend run authority:bootstrap --",
+    "remote:authority:verify": "npm --prefix remote-backend run authority:verify --",
+    "remote:controls:get": "npm --prefix remote-backend run controls:get --",
+    "remote:controls:set": "npm --prefix remote-backend run controls:set --",
+    "remote:e2e": "node --test --test-concurrency=1 tests/remoteApprovalLifecycleE2E.test.mjs",
+    "package:mac": "electron-vite build && electron-builder --mac",
+    "release:baseline": "node scripts/create-release-payload-manifest.mjs --output .omo/evidence/project-completion/W4-T1 --require-release-config"
   },
   "build": {
     "appId": "com.playtimepact.desktop",
@@ -75,7 +86,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.4.20",
-    "electron": "^42.3.0",
+    "electron": "42.5.1",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "jsdom": "^30.0.1",
@@ -86,7 +97,7 @@
     "typescript": "^5.6.3",
     "vite": "^7.3.5",
     "vitest": "^4.1.8",
-    "wrangler": "4.118.0"
+    "wrangler": "4.120.0"
   },
   "overrides": {
     "vite": {

@@ -1,4 +1,5 @@
 import { createAuthenticator } from './authenticator.mjs'
+import { createFcmProvider } from './fcmProvider.mjs'
 /* Cloudflare Worker.  All timestamps are milliseconds; expiration is exclusive. */
 const TTL = 300_000
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
@@ -12,6 +13,7 @@ const operationReceipt = (operation, input) => {
   if (operation === 'createRequest') return { v:1,serverNowMs,request:{householdId:input.householdId,requestId:input.requestId,pcId:input.pcId,gameId:input.gameId,allowanceVersion:input.allowanceVersion,processId:input.processId,processStartedAt:input.processStartedAt,membershipEpoch:input.membershipEpoch,serviceEpoch:input.serviceEpoch,requestedAt:serverNowMs,expiresAt:serverNowMs+TTL} }
   if (operation === 'consume') return { v:1,serverNowMs,grant:{grantId:input.requestId,allowanceReservationId:input.requestId,householdId:input.householdId,requestId:input.requestId,pcId:input.pcId,gameId:input.gameId,allowanceVersion:input.allowanceVersion,processId:input.processId,processStartedAt:input.processStartedAt,membershipEpoch:input.membershipEpoch,serviceEpoch:input.serviceEpoch,approvedMinutes:input.approvedMinutes,grantedAt:input.grantedAt,expiresAt:input.expiresAt,launchGame:false} }
   if (operation === 'setAllowance') return { v:1,serverNowMs,allowance:{pcId:input.pcId,gameId:input.gameId,ianaTimeZone:input.ianaTimeZone,ianaDay:input.ianaDay,allowanceVersion:input.expectedVersion+1,totalSeconds:input.totalSeconds,committedSeconds:input.committedSeconds||0,reservedSeconds:input.reservedSeconds||0} }
+  if (operation === 'registerPc') return { v:1,serverNowMs,operation,household_id:input.householdId,pc_id:input.pcId,public_key:input.publicKey,iana_time_zone:input.ianaTimeZone,membership_epoch:input.membershipEpoch,service_epoch:input.serviceEpoch }
   if (operation === 'registerFcmToken' || operation === 'revokeFcmToken') return { v:1,serverNowMs,fcm_token:{household_id:input.householdId,parent_id:input.actorId,token_version:input.tokenVersion,status:operation==='revokeFcmToken'?'revoked':'active'} }
   const receipt = { v:1,serverNowMs,operation }
   for (const key of ['householdId','requestId','pcId','parentId','recoveryParentId','gameId','allowanceVersion','ianaDay','ianaTimeZone','processId','processStartedAt','version','telemetryId']) if (input[key] !== undefined) receipt[key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)] = input[key]
@@ -214,7 +216,24 @@ export function createD1Authority(db, { now = () => Date.now(), fcmProtector, no
       if (parentId === actorId) throw fail('FORBIDDEN')
       return failIf(await one(`UPDATE parent_devices SET status='revoked' WHERE id=? AND household_id=? AND status='active' AND EXISTS(SELECT 1 FROM households h JOIN environments e ON e.id='global' WHERE h.id=? AND h.remote_enabled=1 AND h.deleted_at_ms IS NULL AND e.mode='REMOTE_ENABLED' AND h.service_epoch=? AND h.membership_epoch=?) RETURNING id,status`,parentId,householdId,householdId,h.service_epoch,h.membership_epoch),'NOT_FOUND')
     },
-    async registerPc({householdId,actorId,pcId,publicKey,ianaTimeZone}) { const h=await active(householdId,actorId); if(!publicKey) throw fail('PUBLIC_KEY_REQUIRED'); localDay(ianaTimeZone,now()); return failIf(await one(`INSERT INTO pcs(id,household_id,public_key,iana_time_zone,status,created_at_ms) SELECT ?,?,?,?,'active',? WHERE ${remotePredicate} AND EXISTS(SELECT 1 FROM parent_devices WHERE id=? AND household_id=? AND status='active' AND membership_epoch=?) ON CONFLICT(id) DO UPDATE SET public_key=excluded.public_key,iana_time_zone=excluded.iana_time_zone,status='active' WHERE pcs.household_id=excluded.household_id RETURNING id,household_id,iana_time_zone,status`,pcId,householdId,publicKey,ianaTimeZone,now(),h.global_epoch,householdId,h.service_epoch,h.membership_epoch,actorId,householdId,h.membership_epoch),'PC_ID_CONFLICT') },
+    async registerPc({householdId,actorId,pcId,publicKey,ianaTimeZone}) {
+      const h=await active(householdId,actorId,false)
+      if(!publicKey) throw fail('PUBLIC_KEY_REQUIRED')
+      localDay(ianaTimeZone,now())
+      const existing=await one(`SELECT id,household_id,public_key,iana_time_zone,status FROM pcs WHERE id=?`,pcId)
+      if(existing) {
+        if(existing.household_id!==householdId||existing.public_key!==publicKey||existing.iana_time_zone!==ianaTimeZone||existing.status!=='active') throw fail('PC_ID_CONFLICT')
+        await administrator(householdId,actorId)
+        return existing
+      }
+      const firstPc=!(await one(`SELECT id FROM pcs WHERE household_id=? LIMIT 1`,householdId))
+      if(firstPc) {
+        await administrator(householdId,actorId)
+        return failIf(await one(`INSERT INTO pcs(id,household_id,public_key,iana_time_zone,status,created_at_ms) SELECT ?,?,?,?,'active',? WHERE NOT EXISTS(SELECT 1 FROM pcs WHERE household_id=?) RETURNING id,household_id,public_key,iana_time_zone,status`,pcId,householdId,publicKey,ianaTimeZone,now(),householdId),'PC_ID_CONFLICT')
+      }
+      const enabled=await active(householdId,actorId,true,'respond_or_issue')
+      return failIf(await one(`INSERT INTO pcs(id,household_id,public_key,iana_time_zone,status,created_at_ms) SELECT ?,?,?,?,'active',? WHERE ${remotePredicate} AND EXISTS(SELECT 1 FROM parent_devices WHERE id=? AND household_id=? AND status='active' AND membership_epoch=?) ON CONFLICT(id) DO UPDATE SET status='active' WHERE pcs.household_id=excluded.household_id AND pcs.public_key=excluded.public_key AND pcs.iana_time_zone=excluded.iana_time_zone RETURNING id,household_id,public_key,iana_time_zone,status`,pcId,householdId,publicKey,ianaTimeZone,now(),enabled.global_epoch,householdId,enabled.service_epoch,enabled.membership_epoch,actorId,householdId,enabled.membership_epoch),'PC_ID_CONFLICT')
+    },
     async revokePc({householdId,actorId,pcId}) { const h=await active(householdId,actorId); return failIf(await one(`UPDATE pcs SET status='revoked' WHERE id=? AND household_id=? AND status='active' AND ${remotePredicate} AND EXISTS(SELECT 1 FROM parent_devices WHERE id=? AND household_id=? AND status='active' AND membership_epoch=?) RETURNING id,status`,pcId,householdId,h.global_epoch,householdId,h.service_epoch,h.membership_epoch,actorId,householdId,h.membership_epoch),'NOT_FOUND') },
     async issuePairing({householdId,actorId,pcId,pairingSessionId,pairingToken,createdAt,expiresAt}) {
       const h=await active(householdId,actorId,true,'respond_or_issue')
@@ -471,15 +490,38 @@ export function createD1Authority(db, { now = () => Date.now(), fcmProtector, no
             db.prepare(`UPDATE notification_intents SET delivered_at_ms=? WHERE id=? AND NOT EXISTS(SELECT 1 FROM fcm_tokens t WHERE t.household_id=notification_intents.household_id AND t.status='active' AND t.created_at_ms<=notification_intents.created_at_ms AND NOT EXISTS(SELECT 1 FROM notification_deliveries d WHERE d.intent_id=notification_intents.id AND d.token_id=t.id AND d.state IN('delivered','error')) )`).bind(createdAt,row.intent_id),
           ]); delivered++
         } catch(error) {
-          const retryable=attempt<3 && error?.code!=='PROVIDER_REJECTED' && error?.code!=='PROVIDER_RECEIPT_REQUIRED', next=retryable ? createdAt+attempt*60_000 : null
+          const classifiedRetryable=error?.retryable===true || (error?.retryable===undefined && error?.code==='PROVIDER_TRANSIENT')
+          const retryable=attempt<3 && classifiedRetryable, next=retryable ? createdAt+attempt*60_000 : null
           await batch([
             db.prepare(`INSERT INTO notification_deliveries(id,intent_id,token_id,attempt,state,provider_receipt,error_code,next_attempt_at_ms,created_at_ms,delivered_at_ms) VALUES(?,?,?,?,?,NULL,?,?,?,NULL)`).bind(deliveryId,row.intent_id,row.token_id,attempt,retryable?'retry':'error',error?.code||'DELIVERY_FAILED',next,createdAt),
+            db.prepare(`UPDATE fcm_tokens SET status='quarantined',revoked_at_ms=? WHERE id=? AND ?='FCM_DEVICE_TOKEN_INVALID' AND status='active' RETURNING id`).bind(createdAt,row.token_id,error?.code||'DELIVERY_FAILED'),
             db.prepare(`UPDATE notification_intents SET delivered_at_ms=? WHERE id=? AND ?='error' AND NOT EXISTS(SELECT 1 FROM fcm_tokens t WHERE t.household_id=notification_intents.household_id AND t.status='active' AND t.created_at_ms<=notification_intents.created_at_ms AND NOT EXISTS(SELECT 1 FROM notification_deliveries d WHERE d.intent_id=notification_intents.id AND d.token_id=t.id AND d.state IN('delivered','error')) )`).bind(createdAt,row.intent_id,retryable?'retry':'error'),
           ])
           retried+=retryable?1:0
         }
       }
       return { attempted:pending.length, delivered, retried }
+    },
+    async operatorPurgeSynthetic({householdId,actorId,operationKey}) {
+      const syntheticId=/^household-(?:staging|fcm(?:-remediation)?)-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(householdId || '')?.[1]
+      if (!syntheticId || !operationKey) throw fail('SYNTHETIC_CLEANUP_REQUIRED')
+      const t=now()
+      const replay=await one(`SELECT r.operation_key,t.identity_hash,t.deleted_at_ms,t.purge_after_ms,t.tombstoned_at_ms,t.expires_at_ms FROM deletion_receipts r JOIN delete_tombstones t ON t.household_id=r.household_id WHERE r.household_id=? AND r.actor_id=? AND r.expires_at_ms>?`,householdId,actorId,t)
+      if (replay) return {operation:'operator-staging-synthetic-cleanup',householdId,operationKey:replay.operation_key,purged:true,tombstone:{identity_hash:replay.identity_hash,deleted_at_ms:replay.deleted_at_ms,purge_after_ms:replay.purge_after_ms,tombstoned_at_ms:replay.tombstoned_at_ms,expires_at_ms:replay.expires_at_ms}}
+      if (!await one(`SELECT id FROM households WHERE id=? AND setup_token=? AND deleted_at_ms IS NULL`,householdId,`synthetic:${syntheticId}`)) throw fail('SYNTHETIC_CLEANUP_REQUIRED')
+      const rows=await batch([
+        db.prepare(`UPDATE households SET remote_enabled=0,create_permission=0,respond_or_issue_permission=0,consume_permission=0,deleted_at_ms=?,delete_state='pending_purge',purge_after_ms=?,service_epoch=service_epoch+1,last_operation_key=? WHERE id=? AND setup_token=? AND deleted_at_ms IS NULL RETURNING id,service_epoch,membership_epoch`).bind(t,t,operationKey,householdId,`synthetic:${syntheticId}`),
+        db.prepare(`INSERT INTO deletion_receipts(household_id,actor_id,operation_key,public_jwk,membership_epoch,service_epoch,receipt_json,expires_at_ms,created_at_ms) SELECT h.id,?,?,o.public_jwk,h.membership_epoch,e.service_epoch,json_object('operation','operator-staging-synthetic-cleanup','household_id',h.id,'last_operation_key',h.last_operation_key,'deleted_at_ms',h.deleted_at_ms,'service_epoch',h.service_epoch,'membership_epoch',h.membership_epoch),?,? FROM households h JOIN operator_authorities o ON o.id=? AND o.status='active' JOIN environments e ON e.id='global' WHERE h.id=? AND h.last_operation_key=? ON CONFLICT(household_id) DO UPDATE SET actor_id=excluded.actor_id,operation_key=excluded.operation_key,public_jwk=excluded.public_jwk,membership_epoch=excluded.membership_epoch,service_epoch=excluded.service_epoch,receipt_json=excluded.receipt_json,expires_at_ms=excluded.expires_at_ms,created_at_ms=excluded.created_at_ms RETURNING household_id`).bind(actorId,operationKey,t+120*24*60*60*1000,t,actorId,householdId,operationKey),
+      ])
+      if (!rows[0].results?.length || !rows[1].results?.length) {
+        const existing=await one(`SELECT r.operation_key,t.identity_hash,t.deleted_at_ms,t.purge_after_ms,t.tombstoned_at_ms,t.expires_at_ms FROM deletion_receipts r JOIN delete_tombstones t ON t.household_id=r.household_id WHERE r.household_id=? AND r.actor_id=? AND r.expires_at_ms>?`,householdId,actorId,t)
+        if (!existing) throw fail('NOT_FOUND')
+        await this.purgeDeleted(t)
+        return {operation:'operator-staging-synthetic-cleanup',householdId,operationKey:existing.operation_key,purged:true,tombstone:{identity_hash:existing.identity_hash,deleted_at_ms:existing.deleted_at_ms,purge_after_ms:existing.purge_after_ms,tombstoned_at_ms:existing.tombstoned_at_ms,expires_at_ms:existing.expires_at_ms}}
+      }
+      const deletion=await this.purgeDeleted(t)
+      const tombstone=await one(`SELECT identity_hash,deleted_at_ms,purge_after_ms,tombstoned_at_ms,expires_at_ms FROM delete_tombstones WHERE household_id=?`,householdId)
+      return {operation:'operator-staging-synthetic-cleanup',householdId,operationKey,purged:deletion.purged===1,tombstone}
     },
     async purgeDeleted(nowMs = now(), limit = 25) {
       await all(`DELETE FROM delete_tombstones WHERE household_id IN(SELECT household_id FROM delete_tombstones WHERE expires_at_ms<=? LIMIT 100) RETURNING household_id`,nowMs)
@@ -516,30 +558,18 @@ export function createD1Authority(db, { now = () => Date.now(), fcmProtector, no
           db.prepare(`DELETE FROM households WHERE id=? AND (delete_state='pending_purge' OR EXISTS(SELECT 1 FROM delete_tombstones t WHERE t.household_id=households.id AND t.expires_at_ms>?))`).bind(row.id,nowMs),
         ])
       }
+      await all(`DELETE FROM rate_windows WHERE (scope LIKE 'pc:%' AND NOT EXISTS(SELECT 1 FROM pcs WHERE id=substr(rate_windows.scope,4))) OR (scope LIKE 'telemetry:%' AND NOT EXISTS(SELECT 1 FROM households WHERE id=substr(rate_windows.scope,11))) OR (scope LIKE 'mutation:%' AND NOT EXISTS(SELECT 1 FROM parent_devices WHERE id=substr(rate_windows.scope,10)) AND NOT EXISTS(SELECT 1 FROM pcs WHERE id=substr(rate_windows.scope,10)) AND NOT EXISTS(SELECT 1 FROM setup_authorities WHERE id=substr(rate_windows.scope,10) AND status='active') AND NOT EXISTS(SELECT 1 FROM operator_authorities WHERE id=substr(rate_windows.scope,10) AND status='active')) RETURNING scope`)
       return { purged:rows.length }
     },
     async telemetry({householdId,kind,payload,telemetryId}) { const h=await active(householdId,null,true,'create'); await quota(`telemetry:${householdId}`); await all(`DELETE FROM telemetry WHERE created_at_ms<? RETURNING id`,now()-90*24*60*60*1000); const encoded=JSON.stringify(payload); if(!h || !kind||!telemetryId||encoded.length>4096) throw fail('BAD_TELEMETRY'); return one(`INSERT INTO telemetry VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING RETURNING id`,telemetryId,householdId,kind,now(),encoded) },
   }
 }
-const httpsNotificationProvider = ({ endpoint, bearerToken, fetchImpl = fetch } = {}) => {
-  if(typeof endpoint!=='string' || typeof bearerToken!=='string' || !bearerToken) return null
-  let url
-  try { url=new URL(endpoint) } catch { return null }
-  if(url.protocol!=='https:') return null
-  return { async send({ token, intentId }) {
-    const response=await fetchImpl(url,{method:'POST',headers:{authorization:`Bearer ${bearerToken}`,'content-type':'application/json'},body:JSON.stringify({token,intentId})})
-    if(!response.ok) throw fail(response.status>=500||response.status===429?'PROVIDER_TRANSIENT':'PROVIDER_REJECTED')
-    const receipt=response.headers.get('x-provider-receipt') || (await response.text()).trim()
-    if(!receipt || receipt.length>512) throw fail('PROVIDER_RECEIPT_REQUIRED')
-    return receipt
-  } }
-}
 const routes = Object.freeze({
-  'POST /v1/households/setup':'setup','PUT /v1/environment/controls':'setEnvironmentControls','PUT /v1/household/controls':'setHouseholdControls','GET /v1/controls':'controls','POST /v1/pair':'pair','POST /v1/pairing-sessions':'issuePairing','POST /v1/parents':'addParent','DELETE /v1/parents':'revokeParent','POST /v1/pcs':'registerPc','DELETE /v1/pcs':'revokePc','POST /v1/requests':'createRequest','GET /v1/requests':'listRequests','GET /v1/request':'getRequest','GET /v1/pc/state':'pcState','GET /v1/parent/state':'parentState','POST /v1/reject':'reject','POST /v1/approve':'approve','POST /v1/consume':'consume','POST /v1/allowances':'setAllowance','POST /v1/reset':'reset','GET /v1/reset/reconcile':'reconcileReset','POST /v1/disable':'disable','DELETE /v1/household':'delete','GET /v1/delete/reconcile':'reconcileDelete','POST /v1/fcm-tokens':'registerFcmToken','DELETE /v1/fcm-tokens':'revokeFcmToken','GET /v1/notifications/reconcile':'reconcileNotifications','POST /v1/telemetry':'telemetry',
+  'POST /v1/households/setup':'setup','DELETE /v1/operator/staging-synthetic-cleanup':'operatorPurgeSynthetic','PUT /v1/environment/controls':'setEnvironmentControls','PUT /v1/household/controls':'setHouseholdControls','GET /v1/controls':'controls','POST /v1/pair':'pair','POST /v1/pairing-sessions':'issuePairing','POST /v1/parents':'addParent','DELETE /v1/parents':'revokeParent','POST /v1/pcs':'registerPc','DELETE /v1/pcs':'revokePc','POST /v1/requests':'createRequest','GET /v1/requests':'listRequests','GET /v1/request':'getRequest','GET /v1/pc/state':'pcState','GET /v1/parent/state':'parentState','POST /v1/reject':'reject','POST /v1/approve':'approve','POST /v1/consume':'consume','POST /v1/allowances':'setAllowance','POST /v1/reset':'reset','GET /v1/reset/reconcile':'reconcileReset','POST /v1/disable':'disable','DELETE /v1/household':'delete','GET /v1/delete/reconcile':'reconcileDelete','POST /v1/fcm-tokens':'registerFcmToken','DELETE /v1/fcm-tokens':'revokeFcmToken','GET /v1/notifications/reconcile':'reconcileNotifications','POST /v1/telemetry':'telemetry',
 })
 const parentOperations = new Set(['issuePairing','addParent','revokeParent','registerPc','revokePc','getRequest','listRequests','parentState','reconcileReset','reconcileDelete','reject','approve','setAllowance','reset','disable','delete','registerFcmToken','revokeFcmToken','reconcileNotifications'])
 const pcOperations = new Set(['createRequest','pcState','consume','telemetry'])
-export function createWorker({ db, authenticator, now = () => Date.now(), pairingTokenSecret, fcmTokenEncryptionKey, notificationProvider } = {}) {
+export function createWorker({ db, authenticator, now = () => Date.now(), pairingTokenSecret, fcmTokenEncryptionKey, notificationProvider, stagingOperatorCleanupEnabled = false } = {}) {
   if (!db || !authenticator?.verify) throw new TypeError('Production Worker requires D1 and an authenticator')
   const authority=createD1Authority(db,{now,fcmProtector:fcmTokenEncryptionKey ? tokenProtector(fcmTokenEncryptionKey) : null,notificationProvider})
   return { async fetch(request) {
@@ -584,6 +614,10 @@ export function createWorker({ db, authenticator, now = () => Date.now(), pairin
         if (proof.principalKind !== 'operator') throw fail('FORBIDDEN')
         return json(await authority.controls(input))
       }
+      if (operation === 'operatorPurgeSynthetic') {
+        if (!stagingOperatorCleanupEnabled || proof.principalKind !== 'operator') throw fail('FORBIDDEN')
+        return json(await authority.operatorPurgeSynthetic(input))
+      }
       if (operation === 'setEnvironmentControls' || operation === 'setHouseholdControls') {
         if (proof.principalKind !== 'operator') throw fail('FORBIDDEN')
         return json(await authority[operation](input))
@@ -592,7 +626,7 @@ export function createWorker({ db, authenticator, now = () => Date.now(), pairin
       if (parentOperations.has(operation) && proof.principalKind !== 'parent') throw fail('FORBIDDEN')
       if (pcOperations.has(operation) && (proof.principalKind !== 'pc' || proof.actorId !== input.pcId || proof.householdId !== input.householdId)) throw fail('FORBIDDEN')
       if(request.method==='GET') return json(await authority[operation](input))
-      const claim=await authority.beginOperation({householdId:input.householdId,actorId:proof.actorId,principalKind:proof.principalKind,capability:capabilityFor(operation),allowDisabled:operation==='reset'||operation==='disable'||operation==='delete',jti:proof.jti,nonce:proof.nonce,idempotencyKey:proof.idempotencyKey,operationDigest})
+      const claim=await authority.beginOperation({householdId:input.householdId,actorId:proof.actorId,principalKind:proof.principalKind,capability:capabilityFor(operation),allowDisabled:operation==='registerPc'||operation==='reset'||operation==='disable'||operation==='delete',jti:proof.jti,nonce:proof.nonce,idempotencyKey:proof.idempotencyKey,operationDigest})
       if(claim.cached) {
         const cached=useCached(claim.cached)
         if (operation === 'issuePairing') return json({ ...cached, token: await pairingToken(pairingTokenSecret, proof.actorId, input.householdId, cached.membership_epoch, proof.idempotencyKey) }, 200, { 'Cache-Control': 'no-store' })
@@ -637,7 +671,8 @@ const deployedWorker = (env) => {
     authenticator:createAuthenticator(env.DB,{setupAuthorityId:env.SETUP_AUTHORITY_ID||'global',minimumParentClientVersion}),
     pairingTokenSecret:env.PAIRING_TOKEN_SECRET,
     fcmTokenEncryptionKey:env.FCM_TOKEN_ENCRYPTION_KEY ? Uint8Array.from(atob(env.FCM_TOKEN_ENCRYPTION_KEY),c=>c.charCodeAt(0)) : undefined,
-    notificationProvider:httpsNotificationProvider({endpoint:env.NOTIFICATION_PROVIDER_ENDPOINT,bearerToken:env.NOTIFICATION_PROVIDER_BEARER}),
+    notificationProvider:createFcmProvider({projectId:env.FCM_PROJECT_ID,clientEmail:env.FCM_CLIENT_EMAIL,privateKey:env.FCM_PRIVATE_KEY}),
+    stagingOperatorCleanupEnabled:env.STAGING_OPERATOR_CLEANUP_ENABLED==='true',
   })
 }
 export default {

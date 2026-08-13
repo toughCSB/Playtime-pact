@@ -1,16 +1,19 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { join, resolve } from 'node:path'
 import koffi from 'koffi'
 import { verifyAdminPassword, writeAdminPasswordPin } from '../fileStore'
-import type { ProtectedAccountingHighWater, ProtectedAccountingScope } from '../../shared/types'
+import type { ProtectedAccountingHighWater, ProtectedAccountingScope, RemoteApprovalAuthoritySnapshot, RemoteApprovalPermissionTuple } from '../../shared/types'
 import type { BrokerSignedProofOperations, RemoteApprovalOperation } from './apiClient'
-import type { RemoteApprovalRuntimeConfig } from './runtimeBroker'
+import type { TimerStartHandoff } from './startCoordinator'
+import { loadRemoteApprovalRuntimeConfigMetadata, type RemoteApprovalRuntimeConfig } from './runtimeBroker'
 
 export const PRIVILEGED_PIPE = '\\\\.\\pipe\\PlaytimePactPrivilegedBroker-v1'
 const MAX_FRAME_BYTES = 64 * 1024
 const REQUEST_TIMEOUT_MS = 5_000
+const MAX_PIN_ATTEMPTS = 5
+const PIN_LOCK_MS = 30_000
 export type PrivilegedCapability = 'operational' | 'membership' | 'accounting'
 export type PrivilegedPurpose = 'remote-approval' | 'membership-sync' | 'start-accounting'
 export type PrivilegedRequest = { capability: PrivilegedCapability; purpose: PrivilegedPurpose; nonce: string; adminSession?: string; operation: string; payload: Record<string, unknown> }
@@ -51,6 +54,15 @@ const validScope = (scope: unknown): scope is ProtectedAccountingScope => {
     && Number.isSafeInteger(value.allowanceVersion) && value.allowanceVersion! > 0
     && Number.isSafeInteger(value.totalMs) && value.totalMs! >= 0
 }
+const validOutcomeContext = (value: unknown, scope: ProtectedAccountingScope): value is { permission: RemoteApprovalPermissionTuple; authority: RemoteApprovalAuthoritySnapshot } => {
+  if (!value || typeof value !== 'object') return false
+  const { permission, authority } = value as { permission?: Partial<RemoteApprovalPermissionTuple>; authority?: Partial<RemoteApprovalAuthoritySnapshot> }
+  return Boolean(permission && authority
+    && permission.householdId === scope.householdId && permission.pcId === scope.pcId && permission.gameId === scope.gameId && permission.allowanceVersion === scope.allowanceVersion
+    && [permission.requestId, permission.processId].every((part) => typeof part === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(part))
+    && Number.isFinite(permission.processStartedAt)
+    && [authority.membershipEpoch, authority.serviceEpoch, authority.authorityGeneration].every((part) => Number.isSafeInteger(part) && part! > 0))
+}
 const validHighWater = (v: ProtectedAccountingHighWater) => Number.isSafeInteger(v.totalMs) && v.totalMs >= 0 && Number.isSafeInteger(v.committedMs) && v.committedMs >= 0 && Number.isSafeInteger(v.reservedMs) && v.reservedMs >= 0 && Number.isSafeInteger(v.version) && v.version >= 0 && v.committedMs + v.reservedMs <= v.totalMs
 const validAccounting = (v: AccountingState) => Boolean(v && typeof v === 'object' && v.scopes && Object.values(v.scopes).every(validHighWater) && Object.keys(v.scopes).length <= 512
   && (!v.floors || Object.values(v.floors).every((floor) => /^\d{4}-\d{2}-\d{2}$/.test(floor.ianaDay) && Number.isSafeInteger(floor.allowanceVersion) && floor.allowanceVersion > 0) && Object.keys(v.floors).length <= 512)
@@ -77,23 +89,126 @@ function normalizeAccounting(value: AccountingState | ProtectedAccountingHighWat
 const frame = (value: unknown) => { const body = Buffer.from(JSON.stringify(value)); if (body.length > MAX_FRAME_BYTES) throw new Error('Privileged message too large'); const header = Buffer.allocUnsafe(4); header.writeUInt32BE(body.length); return Buffer.concat([header, body]) }
 const statePath = (dir: string) => join(dir, 'accounting.journal')
 const localPolicyPath = (dir: string) => join(dir, 'local-policy.json')
-function readProtectedLocalPolicy(dir?: string): ProtectedLocalPolicy {
-  if (!dir || !existsSync(localPolicyPath(dir))) throw new Error('Protected local policy uninitialized')
-  const value = JSON.parse(readFileSync(localPolicyPath(dir), 'utf8')) as unknown
-  if (!validProtectedLocalPolicy(value)) throw new Error('Protected local policy integrity unavailable')
-  return { ...value }
+const policySelectorName = (dir: string) => createHash('sha256').update(resolve(dir).toLowerCase()).digest('hex')
+const registryHive = (dir: string) => /^c:\\programdata\\playtimepact\\broker/i.test(resolve(dir)) ? 'LocalMachine' : 'CurrentUser'
+const POLICY_SELECTOR_REGISTRY_PATH = 'SOFTWARE\\PlaytimePact\\PolicySelectors'
+const ERROR_FILE_NOT_FOUND = 2
+const REG_SZ = 1
+const MAX_SELECTOR_BYTES = 4096
+const registryRoot = (dir: string) => registryHive(dir) === 'LocalMachine' ? 0x80000002 : 0x80000001
+function registryError(operation: string, status: number): Error {
+  return new Error(`Protected policy selector ${operation} failed (win32=${status})`)
 }
-function writeProtectedLocalPolicy(dir: string, policy: ProtectedLocalPolicy): void {
-  const target = localPolicyPath(dir)
-  const temporary = `${target}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-  writeFileSync(temporary, `${JSON.stringify(policy)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
-  if (process.platform === 'win32') {
-    if (!MoveFileExW || !MoveFileExW(temporary, target, 0x1 | 0x8)) throw new Error('Protected local policy commit failed')
-  } else {
-    renameSync(temporary, target)
+function closeRegistryKey(key: unknown): void {
+  const status = RegCloseKey?.(key) ?? -1
+  if (status !== 0) throw registryError('close', status)
+}
+function readPolicySelector(dir: string): string | null {
+  if (process.platform !== 'win32') return existsSync(join(dir, '.policy-selector')) ? readFileSync(join(dir, '.policy-selector'), 'utf8').trim() : null
+  if (!RegOpenKeyExW || !RegQueryValueExW || !RegCloseKey) throw registryError('API availability', -1)
+  const opened: [unknown] = [null]
+  const openStatus = RegOpenKeyExW(registryRoot(dir), POLICY_SELECTOR_REGISTRY_PATH, 0, 0x0001, opened)
+  if (openStatus === ERROR_FILE_NOT_FOUND) return null
+  if (openStatus !== 0 || !opened[0]) throw registryError('open', openStatus)
+  try {
+    const type = Buffer.alloc(4)
+    const size = Buffer.alloc(4)
+    const name = policySelectorName(dir)
+    const sizeStatus = RegQueryValueExW(opened[0], name, null, type, null, size)
+    if (sizeStatus === ERROR_FILE_NOT_FOUND) return null
+    if (sizeStatus !== 0) throw registryError('size query', sizeStatus)
+    const byteLength = size.readUInt32LE(0)
+    if (type.readUInt32LE(0) !== REG_SZ || byteLength < 2 || byteLength > MAX_SELECTOR_BYTES || byteLength % 2 !== 0) {
+      throw new Error('Protected policy selector registry value invalid')
+    }
+    const value = Buffer.alloc(byteLength)
+    const readStatus = RegQueryValueExW(opened[0], name, null, type, value, size)
+    if (readStatus !== 0) throw registryError('read', readStatus)
+    const actualLength = size.readUInt32LE(0)
+    if (type.readUInt32LE(0) !== REG_SZ || actualLength < 2 || actualLength > byteLength || actualLength % 2 !== 0 || value.readUInt16LE(actualLength - 2) !== 0) {
+      throw new Error('Protected policy selector registry value invalid')
+    }
+    const selected = value.subarray(0, actualLength - 2).toString('utf16le').trim()
+    if (!selected) throw new Error('Protected policy selector registry value invalid')
+    return selected
+  } finally {
+    closeRegistryKey(opened[0])
   }
 }
-type JournalEntry = { previous: string; scopeKey: string; receipt: string; base: string; operation: string; amountMs: number; expiresAt?: number; terminal?: boolean; state: AccountingState; hash: string }
+function writePolicySelector(dir: string, file: string): void {
+  if (process.platform !== 'win32') {
+    const path = join(dir, '.policy-selector'); const temporary = `${path}.${process.pid}.tmp`; durableTemporary(temporary, file); renameSync(temporary, path); return
+  }
+  if (!RegCreateKeyExW || !RegSetValueExW || !RegFlushKey || !RegCloseKey) throw registryError('API availability', -1)
+  const opened: [unknown] = [null]
+  const createStatus = RegCreateKeyExW(registryRoot(dir), POLICY_SELECTOR_REGISTRY_PATH, 0, null, 0, 0x0002, null, opened, null)
+  if (createStatus !== 0 || !opened[0]) throw registryError('create', createStatus)
+  try {
+    const value = Buffer.from(`${file}\0`, 'utf16le')
+    const writeStatus = RegSetValueExW(opened[0], policySelectorName(dir), 0, REG_SZ, value, value.length)
+    if (writeStatus !== 0) throw registryError('write', writeStatus)
+    const flushStatus = RegFlushKey(opened[0])
+    if (flushStatus !== 0) throw registryError('flush', flushStatus)
+  } finally {
+    closeRegistryKey(opened[0])
+  }
+}
+function readSelectedPolicy(dir: string, file: string): ProtectedLocalPolicy {
+  const match = /^local-policy\.v(\d+)\.([a-f0-9]{64})\.json$/.exec(file)
+  if (!match) throw new Error('Protected local policy integrity unavailable')
+  const payload = readFileSync(join(dir, file), 'utf8')
+  if (createHash('sha256').update(payload).digest('hex') !== match[2]) throw new Error('Protected local policy integrity unavailable')
+  const policy = JSON.parse(payload) as unknown
+  if (!validProtectedLocalPolicy(policy) || policy.version !== Number(match[1])) throw new Error('Protected local policy integrity unavailable')
+  return { ...policy }
+}
+function readProtectedLocalPolicy(dir?: string): ProtectedLocalPolicy {
+  if (!dir) throw new Error('Protected local policy uninitialized')
+  const selected = readPolicySelector(dir)
+  if (selected) return readSelectedPolicy(dir, selected)
+  if (!existsSync(localPolicyPath(dir))) throw new Error('Protected local policy uninitialized')
+  const legacy = JSON.parse(readFileSync(localPolicyPath(dir), 'utf8')) as unknown
+  if (!validProtectedLocalPolicy(legacy)) throw new Error('Protected local policy integrity unavailable')
+  writeProtectedLocalPolicy(dir, legacy)
+  return readSelectedPolicy(dir, readPolicySelector(dir)!)
+}
+function durableTemporary(path: string, data: string): void {
+  writeFileSync(path, data, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+  const descriptor = openSync(path, 'r+')
+  try { fsyncSync(descriptor) } finally { closeSync(descriptor) }
+}
+function replaceSameDirectoryFile(temporary: string, target: string, failure: string): void {
+  try {
+    if (process.platform === 'win32') {
+      if (!MoveFileExW?.(temporary, target, 0x1 | 0x8)) throw new Error(`${failure} (win32=${GetLastError?.() ?? 'unavailable'})`)
+    } else {
+      renameSync(temporary, target)
+    }
+  } catch (error) {
+    if (existsSync(temporary)) unlinkSync(temporary)
+    if (error instanceof Error && error.message.startsWith(failure)) throw error
+    throw new Error(failure)
+  }
+}
+type PolicyPublicationHook = (phase: 'before-payload' | 'after-payload' | 'before-selector' | 'after-selector') => void
+function writeProtectedLocalPolicy(dir: string, policy: ProtectedLocalPolicy, hook: PolicyPublicationHook = () => undefined): void {
+  const payload = `${JSON.stringify(policy)}\n`
+  const hash = createHash('sha256').update(payload).digest('hex')
+  const file = `local-policy.v${policy.version}.${hash}.json`
+  const payloadPath = join(dir, file)
+  hook('before-payload')
+  if (!existsSync(payloadPath)) {
+    const handle = openSync(payloadPath, 'wx', 0o600)
+    try { writeFileSync(handle, payload, 'utf8'); fsyncSync(handle) } finally { closeSync(handle) }
+  }
+  if (readFileSync(payloadPath, 'utf8') !== payload) throw new Error('Protected local policy integrity unavailable')
+  readSelectedPolicy(dir, file)
+  hook('after-payload')
+  hook('before-selector')
+  writePolicySelector(dir, file)
+  hook('after-selector')
+}
+type JournalEntry = { previous: string; scopeKey: string; receipt: string; base: string; operation: string; amountMs: number; expiresAt?: number; terminal?: boolean; started?: boolean; attemptId?: string; permission?: RemoteApprovalPermissionTuple; authority?: RemoteApprovalAuthoritySnapshot; state: AccountingState; hash: string }
 function scopeKeyFromEntry(entry: JournalEntry): string {
   return /^[A-Za-z0-9._:|+-]{1,768}$/.test(entry.scopeKey) ? entry.scopeKey : ''
 }
@@ -104,7 +219,7 @@ function readJournal(dir: string): JournalEntry[] {
   for (const line of readFileSync(statePath(dir), 'utf8').trim().split('\n')) {
     if (!line) continue
     const entry = JSON.parse(line) as JournalEntry
-    const hash = createHash('sha256').update(JSON.stringify({ previous: entry.previous, scopeKey: entry.scopeKey, receipt: entry.receipt, base: entry.base, operation: entry.operation, amountMs: entry.amountMs, expiresAt: entry.expiresAt, terminal: entry.terminal, state: entry.state })).digest('base64url')
+    const hash = createHash('sha256').update(JSON.stringify({ previous: entry.previous, scopeKey: entry.scopeKey, receipt: entry.receipt, base: entry.base, operation: entry.operation, amountMs: entry.amountMs, expiresAt: entry.expiresAt, terminal: entry.terminal, started: entry.started, attemptId: entry.attemptId, permission: entry.permission, authority: entry.authority, state: entry.state })).digest('base64url')
     if (entry.previous !== previous || entry.hash !== hash || !validAccounting(entry.state)
       || entry.scopeKey !== scopeKeyFromEntry(entry) || !/^[A-Za-z0-9._:-]{16,256}$/.test(entry.receipt) || !/^[A-Za-z0-9._:-]{16,256}$/.test(entry.base)) throw new Error('Protected accounting integrity unavailable')
     previous = hash
@@ -114,6 +229,12 @@ function readJournal(dir: string): JournalEntry[] {
 }
 const kernel32 = process.platform === 'win32' ? koffi.load('kernel32.dll') : null
 const advapi32 = process.platform === 'win32' ? koffi.load('advapi32.dll') : null
+const RegOpenKeyExW = advapi32 && advapi32.func('int32_t __stdcall RegOpenKeyExW(void * Key, str16 SubKey, uint32_t Options, uint32_t Sam, _Out_ void ** Result)')
+const RegQueryValueExW = advapi32 && advapi32.func('int32_t __stdcall RegQueryValueExW(void * Key, str16 ValueName, void * Reserved, _Out_ uint32_t * Type, _Out_ void * Data, _Inout_ uint32_t * DataSize)')
+const RegCreateKeyExW = advapi32 && advapi32.func('int32_t __stdcall RegCreateKeyExW(void * Key, str16 SubKey, uint32_t Reserved, str16 Class, uint32_t Options, uint32_t Sam, void * SecurityAttributes, _Out_ void ** Result, _Out_ uint32_t * Disposition)')
+const RegSetValueExW = advapi32 && advapi32.func('int32_t __stdcall RegSetValueExW(void * Key, str16 ValueName, uint32_t Reserved, uint32_t Type, void * Data, uint32_t DataSize)')
+const RegFlushKey = advapi32 && advapi32.func('int32_t __stdcall RegFlushKey(void * Key)')
+const RegCloseKey = advapi32 && advapi32.func('int32_t __stdcall RegCloseKey(void * Key)')
 const SecurityAttributes = process.platform === 'win32'
   ? koffi.struct('PPT_SECURITY_ATTRIBUTES', { nLength: 'uint32_t', lpSecurityDescriptor: 'void *', bInheritHandle: 'int32_t' })
   : null
@@ -127,6 +248,7 @@ const CancelIoEx = kernel32 && kernel32.func('bool __stdcall CancelIoEx(void * F
 const ConvertStringSecurityDescriptorToSecurityDescriptorW = advapi32 && advapi32.func('int32_t __stdcall ConvertStringSecurityDescriptorToSecurityDescriptorW(str16 Sddl, uint32_t Revision, _Out_ void ** Descriptor, uint32_t * Size)')
 const LocalFree = kernel32 && kernel32.func('void * __stdcall LocalFree(void * Memory)')
 const MoveFileExW = kernel32 && kernel32.func('bool __stdcall MoveFileExW(str16 ExistingName, str16 NewName, uint32_t Flags)')
+const GetLastError = kernel32 && kernel32.func('uint32_t __stdcall GetLastError()')
 const GetNamedPipeClientProcessId = kernel32 && kernel32.func('bool __stdcall GetNamedPipeClientProcessId(void * Pipe, uint32_t * ClientProcessId)')
 const GetNamedPipeServerProcessId = kernel32 && kernel32.func('bool __stdcall GetNamedPipeServerProcessId(void * Pipe, uint32_t * ServerProcessId)')
 const OpenSCManagerW = advapi32 && advapi32.func('void * __stdcall OpenSCManagerW(str16 MachineName, str16 DatabaseName, uint32_t DesiredAccess)')
@@ -177,10 +299,16 @@ function windowsServiceProcessId(): number | null {
     CloseHandle(manager)
   }
 }
+export function privilegedPipeSddl(targetAccountSid = 'IU'): string {
+  if (targetAccountSid !== 'IU' && !/^S-1-5-(?:\d+-){1,14}\d+$/.test(targetAccountSid)) throw new Error('Protected named-pipe account SID invalid')
+  return `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;${targetAccountSid})`
+}
 function createSecuredWindowsPipe(pipe: string): unknown {
   if (!CreateNamedPipeW || !ConvertStringSecurityDescriptorToSecurityDescriptorW || !LocalFree || !SecurityAttributes) return null
   const descriptor: [unknown] = [null]
-  const sddl = 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)'
+  // Before remote provisioning, only an interactive logon may use local-only
+  // accounting. Once provisioned, the DACL narrows to the configured account SID.
+  const sddl = privilegedPipeSddl(loadRemoteApprovalRuntimeConfigMetadata()?.windowsAccountSid)
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, descriptor, null) || !descriptor[0]) return null
   try {
     const handle = CreateNamedPipeW(
@@ -201,13 +329,16 @@ function createSecuredWindowsPipe(pipe: string): unknown {
 
 export class PrivilegedApprovalService {
   private readonly seen = new Map<string, number>(); private readonly tokens = new Map<string, { peer: string; expires: number }>()
+  private readonly pinCallers = new Map<string, { attempts: number; lockedUntil: number }>()
+  private pinGlobal = { attempts: 0, lockedUntil: 0 }
   private readonly journal: JournalEntry[]
   private accounting: AccountingState
   private localPolicy: ProtectedLocalPolicy | null
-  constructor(private readonly operational: (operation: string, payload: Record<string, unknown>) => Promise<unknown>, private readonly membership: (operation: string, payload: Record<string, unknown>) => Promise<unknown>, accounting: AccountingState | ProtectedAccountingHighWater, private readonly stateDir?: string, private readonly now = () => Date.now(), private readonly verifyPin = (pin: string) => verifyAdminPassword(pin)) {
+  constructor(private readonly operational: (operation: string, payload: Record<string, unknown>) => Promise<unknown>, private readonly membership: (operation: string, payload: Record<string, unknown>) => Promise<unknown>, accounting: AccountingState | ProtectedAccountingHighWater, private readonly stateDir?: string, private readonly now = () => Date.now(), private readonly verifyPin = (pin: string) => verifyAdminPassword(pin), private readonly policyPublicationHook: PolicyPublicationHook = () => undefined, private readonly journalAppendHook: (operation: string) => void = () => undefined) {
     this.accounting = normalizeAccounting(accounting)
     this.journal = stateDir ? readJournal(stateDir) : []
-    this.localPolicy = stateDir && existsSync(localPolicyPath(stateDir)) ? readProtectedLocalPolicy(stateDir) : null
+    this.localPolicy = stateDir && (readPolicySelector(stateDir) || existsSync(localPolicyPath(stateDir))) ? readProtectedLocalPolicy(stateDir) : null
+    this.finishPendingOutcomes()
     this.releaseExpiredReservations()
   }
   static loadAccounting(dir: string): AccountingState {
@@ -226,12 +357,27 @@ export class PrivilegedApprovalService {
     if (!/^[A-Za-z0-9_-]{16,128}$/.test(request.nonce) || this.seen.has(request.nonce)) throw new Error('Privileged service replay denied')
     this.seen.set(request.nonce, this.now() + 300000)
     if ((request.capability === 'operational' && request.purpose !== 'remote-approval') || (request.capability === 'membership' && request.purpose !== 'membership-sync') || (request.capability === 'accounting' && request.purpose !== 'start-accounting')) throw new Error('Privileged service capability denied')
-    if (request.operation === 'verify-pin') { if (request.capability !== 'membership' || !this.verifyPin(String(request.payload.pin ?? ''))) return { ok: false }; if (this.tokens.size >= 128) this.tokens.delete(this.tokens.keys().next().value!); const token = nonce(); this.tokens.set(token, { peer, expires: this.now() + 300000 }); return { ok: true, token } }
+    if (request.operation === 'verify-pin') {
+      if (request.capability !== 'membership' || !this.pinAllowed(peer)) return { ok: false }
+      const ok = this.verifyPin(String(request.payload.pin ?? ''))
+      this.recordPinAttempt(peer, ok)
+      if (!ok) return { ok: false }
+      if (this.tokens.size >= 128) this.tokens.delete(this.tokens.keys().next().value!)
+      const token = nonce(); this.tokens.set(token, { peer, expires: this.now() + 300000 }); return { ok: true, token }
+    }
     if (request.capability === 'membership' && !this.consume(request.adminSession, peer)) throw new Error('Privileged service capability denied')
     if (request.operation === 'change-pin') { const pin = String(request.payload.newPin ?? ''); if (!/^\d{4}$/.test(pin)) throw new Error('invalid pin'); writeAdminPasswordPin(pin); for (const [token, session] of this.tokens) if (session.peer === peer) this.tokens.delete(token); return true }
     if (request.operation === 'read-local-policy') {
       if (request.capability !== 'operational' || !this.localPolicy) throw new Error('Protected local policy uninitialized')
       return { ...this.localPolicy }
+    }
+    if (request.operation === 'list-recoverable-timer-starts') {
+      if (request.capability !== 'accounting') throw new Error('Privileged service capability denied')
+      return this.journal.filter((entry) => entry.operation === 'commit'
+        && !this.journal.some((candidate) => candidate.operation === 'materialized' && candidate.base === entry.receipt && candidate.scopeKey === entry.scopeKey)).map((entry) => ({
+        receipt: entry.receipt, minutes: entry.amountMs / 60_000, permission: entry.permission, authority: entry.authority,
+        scope: scopeFromKey(entry.scopeKey, entry.state.scopes[entry.scopeKey]!),
+      }))
     }
     if (request.operation === 'set-local-policy') {
       if (request.capability !== 'membership' || !this.stateDir) throw new Error('Privileged service capability denied')
@@ -240,7 +386,10 @@ export class PrivilegedApprovalService {
       const unchanged = this.localPolicy !== null && JSON.stringify(proposed) === JSON.stringify(current)
       const candidate = { ...proposed, version: unchanged ? (this.localPolicy?.version ?? 0) : (this.localPolicy?.version ?? 0) + 1 }
       if (!validProtectedLocalPolicy(candidate)) throw new Error('Protected local policy invalid')
-      if (!unchanged) writeProtectedLocalPolicy(this.stateDir, candidate)
+      if (!unchanged) {
+        try { writeProtectedLocalPolicy(this.stateDir, candidate, this.policyPublicationHook) }
+        catch (error) { this.localPolicy = readPolicySelector(this.stateDir) ? readProtectedLocalPolicy(this.stateDir) : this.localPolicy; throw error }
+      }
       this.localPolicy = candidate
       return { ...candidate }
     }
@@ -248,7 +397,62 @@ export class PrivilegedApprovalService {
     if (request.capability === 'membership') return this.membership(request.operation, request.payload)
     return this.accountingOp(request.operation, request.payload)
   }
+  private pinAllowed(peer: string): boolean {
+    const now = this.now()
+    return this.pinGlobal.lockedUntil <= now && (this.pinCallers.get(peer)?.lockedUntil ?? 0) <= now
+  }
+  private recordPinAttempt(peer: string, ok: boolean): void {
+    if (ok) { this.pinGlobal = { attempts: 0, lockedUntil: 0 }; this.pinCallers.delete(peer); return }
+    const now = this.now()
+    const increment = (state: { attempts: number; lockedUntil: number } | undefined) => {
+      const attempts = (state?.lockedUntil ?? 0) <= now ? (state?.attempts ?? 0) + 1 : (state?.attempts ?? 0)
+      return { attempts, lockedUntil: attempts >= MAX_PIN_ATTEMPTS ? now + PIN_LOCK_MS : 0 }
+    }
+    this.pinGlobal = increment(this.pinGlobal)
+    this.pinCallers.set(peer, increment(this.pinCallers.get(peer)))
+    if (this.pinCallers.size > 4096) this.pinCallers.delete(this.pinCallers.keys().next().value!)
+  }
   private consume(token: string | undefined, peer: string): boolean { const session = token && this.tokens.get(token); return Boolean(session && session.peer === peer && session.expires >= this.now()) }
+  private finishPendingOutcomes(): void {
+    for (const start of this.journal.filter((entry) => entry.operation === 'start')) {
+      const related = this.journal.filter((entry) => entry.base === start.base && entry.scopeKey === start.scopeKey)
+      if (related.some((entry) => entry.operation === 'debit' || entry.operation === 'commit' || entry.terminal)) continue
+      const reserve = related.find((entry) => entry.operation === 'reserve')
+      const current = this.accounting.scopes[start.scopeKey]
+      const scope = current && scopeFromKey(start.scopeKey, current)
+      if (!reserve || !scope) throw new Error('Protected accounting integrity unavailable')
+      try { this.accountingOp('debit', { scope, receipt: `${start.base}:debit`, expectedVersion: current.version, amountMs: reserve.amountMs }) }
+      catch { throw new Error('Protected accounting integrity unavailable') }
+    }
+    for (const attempt of this.journal.filter((entry) => entry.operation === 'attempt')) {
+      const related = this.journal.filter((entry) => entry.base === attempt.base && entry.scopeKey === attempt.scopeKey)
+      if (related.some((entry) => entry.operation === 'outcome' || entry.operation === 'debit' || (entry.operation === 'reconcile' && entry.terminal))) continue
+      const current = this.accounting.scopes[attempt.scopeKey]
+      const scope = current && scopeFromKey(attempt.scopeKey, current)
+      if (!scope || !attempt.attemptId || !attempt.permission || !attempt.authority) throw new Error('Protected accounting integrity unavailable')
+      try {
+        this.accountingOp('outcome', { scope, receipt: `${attempt.base}:outcome-started`, expectedVersion: current.version, amountMs: attempt.amountMs, started: true, attemptId: attempt.attemptId, context: { permission: attempt.permission, authority: attempt.authority } })
+      } catch { throw new Error('Protected accounting integrity unavailable') }
+    }
+    for (const outcome of this.journal.filter((entry) => entry.operation === 'outcome')) {
+      const related = this.journal.filter((entry) => entry.base === outcome.base && entry.scopeKey === outcome.scopeKey)
+      if (related.some((entry) => entry.operation === 'debit' || (entry.operation === 'reconcile' && entry.terminal))) continue
+      const current = this.accounting.scopes[outcome.scopeKey]
+      const scope = current && scopeFromKey(outcome.scopeKey, current)
+      if (!scope || typeof outcome.started !== 'boolean') throw new Error('Protected accounting integrity unavailable')
+      try {
+        if (outcome.started) {
+          this.accountingOp('debit', { scope, receipt: `${outcome.base}:debit`, expectedVersion: current.version, amountMs: outcome.amountMs })
+        } else {
+          if (!related.some((entry) => entry.operation === 'reserve')) {
+            this.accountingOp('reserve', { scope, receipt: `${outcome.base}:reserve`, expectedVersion: current.version, amountMs: outcome.amountMs })
+          }
+          const reserved = this.accounting.scopes[outcome.scopeKey]
+          this.accountingOp('reconcile', { scope, receipt: `${outcome.base}:reconcile-terminal`, expectedVersion: reserved.version, terminal: true })
+        }
+      } catch { throw new Error('Protected accounting integrity unavailable') }
+    }
+  }
   private releaseExpiredReservations(): void {
     for (const reserve of this.journal.filter((entry) => entry.operation === 'reserve' && entry.expiresAt !== undefined && entry.expiresAt <= this.now())) {
       const related = this.journal.filter((entry) => entry.base === reserve.base && entry.scopeKey === reserve.scopeKey)
@@ -263,6 +467,9 @@ export class PrivilegedApprovalService {
   }
   private compactJournal(): void {
     if (!this.stateDir || this.journal.length <= 1024) return
+    const unresolvedCommits = this.journal.filter((entry) => entry.operation === 'commit'
+      && !this.journal.some((candidate) => candidate.operation === 'materialized' && candidate.base === entry.receipt && candidate.scopeKey === entry.scopeKey))
+    const unresolvedScopeKeys = new Set(unresolvedCommits.map((entry) => entry.scopeKey))
     const retainedScopes: Record<string, ProtectedAccountingHighWater> = {}
     const floors = { ...(this.accounting.floors ?? {}) }
     let globalFloor = this.accounting.globalFloor
@@ -270,12 +477,17 @@ export class PrivilegedApprovalService {
       const scope = scopeFromKey(key, highWater)
       if (!scope) throw new Error('Protected accounting integrity unavailable')
       const floor = { ianaDay: scope.ianaDay, allowanceVersion: scope.allowanceVersion }
-      if (highWater.reservedMs > 0 || scope.ianaDay === currentScopeDay(scope)) retainedScopes[key] = highWater
+      if (highWater.reservedMs > 0 || scope.ianaDay === currentScopeDay(scope) || unresolvedScopeKeys.has(key)) retainedScopes[key] = highWater
       else {
         const domain = floorKey(scope)
         if (!floors[domain] || compareFloor(floors[domain], floor) < 0) floors[domain] = floor
         if (!globalFloor || compareFloor(globalFloor, floor) < 0) globalFloor = floor
       }
+    }
+    for (const commit of unresolvedCommits) {
+      const highWater = commit.state.scopes[commit.scopeKey]
+      if (!highWater) throw new Error('Protected accounting compaction unavailable')
+      retainedScopes[commit.scopeKey] = highWater
     }
     const boundedFloors = Object.fromEntries(Object.entries(floors).sort(([, a], [, b]) => compareFloor(b, a)).slice(0, 512))
     const checkpointState: AccountingState = { scopes: retainedScopes, floors: boundedFloors, ...(globalFloor ? { globalFloor } : {}) }
@@ -284,20 +496,18 @@ export class PrivilegedApprovalService {
     const base = `checkpoint-${Date.now()}-0001`
     const hash = createHash('sha256').update(JSON.stringify({ previous: '', scopeKey: checkpointKey, receipt: `${base}:reconcile`, base, operation: 'checkpoint', amountMs: 0, state: checkpointState })).digest('base64url')
     const checkpoint: JournalEntry = { previous: '', scopeKey: checkpointKey, receipt: `${base}:reconcile`, base, operation: 'checkpoint', amountMs: 0, state: checkpointState, hash }
-    const activeEntries = this.journal.filter((entry) => checkpointState.scopes[entry.scopeKey]?.reservedMs > 0)
+    const recoverableReceipts = new Set(unresolvedCommits.map((entry) => entry.receipt))
+    const activeEntries = this.journal.filter((entry) => checkpointState.scopes[entry.scopeKey]?.reservedMs > 0
+      || (entry.operation === 'commit' && recoverableReceipts.has(entry.receipt)))
     const compacted = [checkpoint]
     for (const original of activeEntries) {
       const entry: JournalEntry = { ...original, previous: compacted.at(-1)!.hash, state: checkpointState, hash: '' }
-      entry.hash = createHash('sha256').update(JSON.stringify({ previous: entry.previous, scopeKey: entry.scopeKey, receipt: entry.receipt, base: entry.base, operation: entry.operation, amountMs: entry.amountMs, expiresAt: entry.expiresAt, terminal: entry.terminal, state: entry.state })).digest('base64url')
+      entry.hash = createHash('sha256').update(JSON.stringify({ previous: entry.previous, scopeKey: entry.scopeKey, receipt: entry.receipt, base: entry.base, operation: entry.operation, amountMs: entry.amountMs, expiresAt: entry.expiresAt, terminal: entry.terminal, started: entry.started, attemptId: entry.attemptId, permission: entry.permission, authority: entry.authority, state: entry.state })).digest('base64url')
       compacted.push(entry)
     }
     const temporary = `${statePath(this.stateDir)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-    writeFileSync(temporary, `${compacted.map((entry) => JSON.stringify(entry)).join('\n')}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
-    if (process.platform === 'win32') {
-      if (!MoveFileExW || !MoveFileExW(temporary, statePath(this.stateDir), 0x1 | 0x8)) throw new Error('Protected accounting compaction commit failed')
-    } else {
-      renameSync(temporary, statePath(this.stateDir))
-    }
+    durableTemporary(temporary, `${compacted.map((entry) => JSON.stringify(entry)).join('\n')}\n`)
+    replaceSameDirectoryFile(temporary, statePath(this.stateDir), 'Protected accounting compaction commit failed')
     this.accounting = checkpointState
     this.journal.splice(0, this.journal.length, ...compacted)
   }
@@ -318,17 +528,29 @@ export class PrivilegedApprovalService {
       return { scopes: { ...this.accounting.scopes, [key]: this.accounting.scopes[key] ?? current } }
     }
     const receipt = String(payload.receipt ?? '')
-    const match = /^(.+):(reserve|start|debit|reconcile)(-terminal)?$/.exec(receipt)
+    const match = operation === 'commit' ? [receipt, receipt, 'commit', undefined] : /^(.+):(reserve|start|debit|reconcile|attempt|outcome|materialized)(-terminal|-started|-not-started)?$/.exec(receipt)
     if (!match || !/^[A-Za-z0-9._:-]{16,256}$/.test(receipt)) throw new Error('Protected accounting receipt invalid')
-    const [, base, receiptOperation, terminalSuffix] = match
+    const [, rawBase, receiptOperation, operationSuffix] = match
+    const base = rawBase!
     if (receiptOperation !== operation) throw new Error('Protected accounting receipt transition invalid')
-    const amountMs = operation === 'reserve' || operation === 'debit' ? Number(payload.amountMs) : 0
-    const terminal = operation === 'reconcile' ? terminalSuffix === '-terminal' && payload.terminal === true : undefined
+    const amountMs = ['reserve', 'debit', 'attempt', 'outcome', 'commit', 'materialized'].includes(operation) ? Number(payload.amountMs) : 0
+    const terminal = operation === 'reconcile' ? operationSuffix === '-terminal' && payload.terminal === true : undefined
+    const started = operation === 'outcome'
+      ? operationSuffix === (payload.started === true ? '-started' : '-not-started') && typeof payload.started === 'boolean' ? payload.started : undefined
+      : undefined
+    const context = operation === 'attempt' || operation === 'outcome' || operation === 'commit' || operation === 'materialized' ? payload.context : undefined
+    const attemptId = operation === 'attempt' || operation === 'outcome'
+      ? payload.attemptId === undefined ? undefined : String(payload.attemptId)
+      : undefined
+    if ((operation === 'attempt' && !/^[0-9a-f-]{36}$/.test(attemptId ?? ''))
+      || (operation === 'outcome' && attemptId !== undefined && !/^[0-9a-f-]{36}$/.test(attemptId))
+      || ((operation === 'attempt' || operation === 'outcome' || operation === 'commit' || operation === 'materialized') && !validOutcomeContext(context, scope))) throw new Error('Protected accounting attempt invalid')
+    if (operation === 'outcome' && started === undefined) throw new Error('Protected accounting outcome invalid')
     const expiresAt = operation === 'reserve' && payload.expiresAt !== undefined ? Number(payload.expiresAt) : undefined
     if (expiresAt !== undefined && (!Number.isFinite(expiresAt) || expiresAt <= this.now())) throw new Error('Protected accounting reservation expiry invalid')
     const duplicate = this.journal.find((entry) => entry.receipt === receipt)
     if (duplicate) {
-      if (duplicate.scopeKey !== key || duplicate.base !== base || duplicate.operation !== operation || duplicate.amountMs !== amountMs || (expiresAt !== undefined && duplicate.expiresAt !== expiresAt) || duplicate.terminal !== terminal) throw new Error('Protected accounting receipt conflict')
+      if (duplicate.scopeKey !== key || duplicate.base !== base || duplicate.operation !== operation || duplicate.amountMs !== amountMs || (expiresAt !== undefined && duplicate.expiresAt !== expiresAt) || duplicate.terminal !== terminal || duplicate.started !== started || duplicate.attemptId !== attemptId || ((operation === 'attempt' || operation === 'outcome' || operation === 'commit' || operation === 'materialized') && JSON.stringify({ permission: duplicate.permission, authority: duplicate.authority }) !== JSON.stringify(context))) throw new Error('Protected accounting receipt conflict')
       return { ...duplicate.state }
     }
     const entries = this.journal.filter((entry) => entry.base === base && entry.scopeKey === key)
@@ -336,10 +558,22 @@ export class PrivilegedApprovalService {
     const start = entries.find((entry) => entry.operation === 'start')
     const debit = entries.find((entry) => entry.operation === 'debit')
     const terminalEntry = entries.find((entry) => entry.operation === 'reconcile' && entry.terminal)
+    const attempt = entries.find((entry) => entry.operation === 'attempt')
+    const outcome = entries.find((entry) => entry.operation === 'outcome')
     if (!Number.isSafeInteger(payload.expectedVersion) || payload.expectedVersion !== current.version) throw new Error('Protected accounting compare-and-swap failed')
     let nextHighWater: ProtectedAccountingHighWater
-    if (operation === 'reserve') {
-      if (entries.length > 0 || !Number.isSafeInteger(amountMs) || amountMs <= 0 || current.committedMs + current.reservedMs + amountMs > effectiveTotalMs) throw new Error('Protected accounting reserve denied')
+    if (operation === 'materialized') {
+      const committed = this.journal.find((entry) => entry.operation === 'commit' && entry.receipt === base && entry.scopeKey === key)
+      if (!committed || committed.amountMs !== amountMs || JSON.stringify({ permission: committed.permission, authority: committed.authority }) !== JSON.stringify(context)) throw new Error('Protected accounting materialized conflict')
+      nextHighWater = current
+    } else if (operation === 'commit') {
+      if (!Number.isSafeInteger(amountMs) || amountMs <= 0) throw new Error('Protected accounting commit denied')
+      const matchingReserve = this.journal.find((entry) => entry.base === base && entry.scopeKey === key && entry.operation === 'reserve')
+      if (matchingReserve && (matchingReserve.amountMs !== amountMs || amountMs > current.reservedMs)) throw new Error('Protected accounting commit conflict')
+      if (!matchingReserve && current.committedMs + current.reservedMs + amountMs > effectiveTotalMs) throw new Error('Protected accounting commit denied')
+      nextHighWater = { ...current, totalMs: effectiveTotalMs, reservedMs: current.reservedMs - (matchingReserve?.amountMs ?? 0), committedMs: current.committedMs + amountMs, version: current.version + 1 }
+    } else if (operation === 'reserve') {
+      if (entries.some((entry) => entry.operation !== 'outcome') || (outcome && outcome.started !== false) || !Number.isSafeInteger(amountMs) || amountMs <= 0 || current.committedMs + current.reservedMs + amountMs > effectiveTotalMs) throw new Error('Protected accounting reserve denied')
       nextHighWater = { ...current, totalMs: effectiveTotalMs, reservedMs: current.reservedMs + amountMs, version: current.version + 1 }
     } else if (operation === 'start') {
       if (!reserve || start || debit || terminalEntry) throw new Error('Protected accounting start transition denied')
@@ -347,9 +581,16 @@ export class PrivilegedApprovalService {
     } else if (operation === 'debit') {
       if (!reserve || !start || debit || terminalEntry || amountMs !== reserve.amountMs || amountMs > current.reservedMs) throw new Error('Protected accounting debit transition denied')
       nextHighWater = { ...current, reservedMs: current.reservedMs - amountMs, committedMs: current.committedMs + amountMs, version: current.version + 1 }
-    } else {
+    } else if (operation === 'reconcile') {
       if (!reserve || debit || terminalEntry || (!start && !terminal)) throw new Error('Protected accounting reconcile transition denied')
       nextHighWater = terminal ? { ...current, reservedMs: current.reservedMs - reserve.amountMs, version: current.version + 1 } : { ...current, version: current.version + 1 }
+    } else if (operation === 'attempt') {
+      if (attempt || outcome || debit || terminalEntry || !reserve || !start || !Number.isSafeInteger(amountMs) || amountMs !== reserve.amountMs) throw new Error('Protected accounting attempt transition denied')
+      nextHighWater = { ...current, totalMs: effectiveTotalMs }
+    } else {
+      if (outcome || debit || terminalEntry || !Number.isSafeInteger(amountMs) || amountMs <= 0 || (attempt ? attempt.attemptId !== attemptId : attemptId !== undefined)) throw new Error('Protected accounting outcome transition denied')
+      if (started && (!reserve || !start)) throw new Error('Protected accounting outcome transition denied')
+      nextHighWater = { ...current, totalMs: effectiveTotalMs }
     }
     const retainedScopes = { ...this.accounting.scopes, [key]: nextHighWater }
     const floors = { ...(this.accounting.floors ?? {}) }
@@ -367,13 +608,15 @@ export class PrivilegedApprovalService {
     const next = { scopes: retainedScopes, floors, globalFloor: this.accounting.globalFloor }
     if (!validAccounting(next)) throw new Error('Protected accounting scope capacity denied')
     const previous = this.journal.at(-1)?.hash ?? ''
-    const entry: JournalEntry = { previous, scopeKey: key, receipt, base, operation, amountMs, expiresAt, terminal, state: next, hash: '' }
-    entry.hash = createHash('sha256').update(JSON.stringify({ previous: entry.previous, scopeKey: entry.scopeKey, receipt: entry.receipt, base: entry.base, operation: entry.operation, amountMs: entry.amountMs, expiresAt: entry.expiresAt, terminal: entry.terminal, state: entry.state })).digest('base64url')
-    this.accounting = next; this.journal.push(entry)
+    const entry: JournalEntry = { previous, scopeKey: key, receipt, base, operation, amountMs, expiresAt, terminal, started, attemptId, ...(context ? context : {}), state: next, hash: '' }
+    entry.hash = createHash('sha256').update(JSON.stringify({ previous: entry.previous, scopeKey: entry.scopeKey, receipt: entry.receipt, base: entry.base, operation: entry.operation, amountMs: entry.amountMs, expiresAt: entry.expiresAt, terminal: entry.terminal, started: entry.started, attemptId: entry.attemptId, permission: entry.permission, authority: entry.authority, state: entry.state })).digest('base64url')
     if (this.stateDir) {
-      writeFileSync(statePath(this.stateDir), `${JSON.stringify(entry)}\n`, { encoding: 'utf8', flag: 'a', mode: 0o600 })
-      this.compactJournal()
+      this.journalAppendHook(operation)
+      const handle = openSync(statePath(this.stateDir), 'a', 0o600)
+      try { writeFileSync(handle, `${JSON.stringify(entry)}\n`, 'utf8'); fsyncSync(handle) } finally { closeSync(handle) }
     }
+    this.accounting = next; this.journal.push(entry)
+    if (this.stateDir) this.compactJournal()
     return { ...next }
   }
 }
@@ -469,7 +712,7 @@ export function startPrivilegedPipeServer(service: PrivilegedApprovalService, pi
 }
 function redactedCode(error: unknown): string | undefined {
   const code = typeof error === 'object' && error ? String((error as { code?: unknown }).code ?? '') : ''
-  return ['UNAVAILABLE', 'OFFLINE', 'EPOCH_MISMATCH', 'STALE_EPOCH', 'PERMISSION_DENIED', 'FORBIDDEN', 'AUTH_REQUIRED', 'DEPENDENCY_UNAVAILABLE', 'INVALID_RESPONSE'].includes(code) ? code : undefined
+  return ['UNAVAILABLE', 'OFFLINE', 'EPOCH_MISMATCH', 'STALE_EPOCH', 'PERMISSION_DENIED', 'FORBIDDEN', 'AUTH_REQUIRED', 'DEPENDENCY_UNAVAILABLE', 'INVALID_RESPONSE', 'CONFIG_INVALID', 'CONFIG_UNREADABLE'].includes(code) ? code : undefined
 }
 function serve(socket: Socket, service: PrivilegedApprovalService, peer: string): void { let data = Buffer.alloc(0); socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy()); socket.on('data', (part: Buffer) => { data = Buffer.concat([data, part]); if (data.length < 4) return; const size = data.readUInt32BE(0); if (size > MAX_FRAME_BYTES || data.length !== size + 4) return socket.destroy(); try { const request = JSON.parse(data.subarray(4).toString()) as PrivilegedRequest; void service.invoke(request, peer).then((result) => socket.end(frame({ ok: true, nonce: request.nonce, result })), (error) => socket.end(frame({ ok: false, nonce: request.nonce, code: redactedCode(error) }))) } catch { socket.destroy() } }) }
 function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServiceIdentity: boolean) {
@@ -584,10 +827,23 @@ export class PrivilegedBrokerClient implements BrokerSignedProofOperations {
     const state = await this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation: 'read', payload: { scope } }) as AccountingState
     return state.scopes[scopeKey(scope)] ?? { totalMs: scope.totalMs, committedMs: 0, reservedMs: 0, version: 0 }
   }
-  private async journal(operation: 'reserve' | 'start' | 'debit' | 'reconcile', receipt: string, amountMs: number, terminal: boolean, scope: ProtectedAccountingScope): Promise<ProtectedAccountingHighWater> {
+  private async journal(operation: 'reserve' | 'start' | 'debit' | 'reconcile' | 'attempt' | 'outcome' | 'commit' | 'materialized', receipt: string, amountMs: number, terminal: boolean, scope: ProtectedAccountingScope, started?: boolean, context?: { permission: RemoteApprovalPermissionTuple; authority: RemoteApprovalAuthoritySnapshot }, attemptId?: string): Promise<ProtectedAccountingHighWater> {
     const state = await this.readAccounting(scope)
-    const result = await this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation, payload: { scope, receipt, expectedVersion: state.version, ...(amountMs > 0 ? { amountMs } : {}), ...(terminal ? { terminal: true } : {}) } }) as AccountingState
+    const result = await this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation, payload: { scope, receipt, expectedVersion: state.version, ...(amountMs > 0 ? { amountMs } : {}), ...(terminal ? { terminal: true } : {}), ...(context ? { context } : {}), ...(started === undefined ? {} : { started }), ...(attemptId ? { attemptId } : {}) } }) as AccountingState
     return result.scopes[scopeKey(scope)]
+  }
+  async commitTimerStart(handoff: TimerStartHandoff): Promise<void> {
+    const amountMs = Math.round(handoff.minutes * 60_000)
+    if (!Number.isSafeInteger(amountMs) || amountMs <= 0) throw new Error('Protected accounting amount invalid')
+    await this.journal('commit', handoff.receipt, amountMs, false, handoff.scope, undefined, { permission: handoff.permission, authority: handoff.authority })
+  }
+  async listRecoverableTimerStarts(): Promise<TimerStartHandoff[]> {
+    return this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation: 'list-recoverable-timer-starts', payload: {} }) as Promise<TimerStartHandoff[]>
+  }
+  async acknowledgeTimerMaterialized(handoff: TimerStartHandoff): Promise<void> {
+    const amountMs = Math.round(handoff.minutes * 60_000)
+    if (!Number.isSafeInteger(amountMs) || amountMs <= 0) throw new Error('Protected accounting amount invalid')
+    await this.journal('materialized', `${handoff.receipt}:materialized`, amountMs, false, handoff.scope, undefined, { permission: handoff.permission, authority: handoff.authority })
   }
   async reservePreauthorization(receipt: string, minutes: number, scope: ProtectedAccountingScope, expiresAt?: number): Promise<void> {
     const amountMs = Math.round(minutes * 60_000)
@@ -601,10 +857,19 @@ export class PrivilegedBrokerClient implements BrokerSignedProofOperations {
     await this.journal('reserve', `${receipt}:reserve`, amountMs, false, scope)
     await this.journal('start', `${receipt}:start`, 0, false, scope)
   }
-  async recordTimerOutcome(receipt: string, minutes: number, started: boolean, scope: ProtectedAccountingScope): Promise<void> {
+  async prepareTimerStartAttempt(receipt: string, minutes: number, attemptId: string, scope: ProtectedAccountingScope, context: { permission: RemoteApprovalPermissionTuple; authority: RemoteApprovalAuthoritySnapshot }): Promise<void> {
     const amountMs = Math.round(minutes * 60_000)
-    if (started) await this.journal('debit', `${receipt}:debit`, amountMs, false, scope)
-    else await this.journal('reconcile', `${receipt}:reconcile-terminal`, 0, true, scope)
+    await this.journal('attempt', `${receipt}:attempt`, amountMs, false, scope, undefined, context, attemptId)
+  }
+  async recordTimerOutcome(receipt: string, minutes: number, started: boolean, scope: ProtectedAccountingScope, context: { permission: RemoteApprovalPermissionTuple; authority: RemoteApprovalAuthoritySnapshot }, attemptId?: string): Promise<void> {
+    const amountMs = Math.round(minutes * 60_000)
+    await this.journal('outcome', `${receipt}:outcome-${started ? 'started' : 'not-started'}`, amountMs, false, scope, started, context, attemptId)
+    if (started) {
+      await this.journal('debit', `${receipt}:debit`, amountMs, false, scope)
+    } else {
+      await this.journal('reserve', `${receipt}:reserve`, amountMs, false, scope)
+      await this.journal('reconcile', `${receipt}:reconcile-terminal`, 0, true, scope)
+    }
   }
   async verifyPin(pin: string): Promise<boolean> { const result = await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), operation: 'verify-pin', payload: { pin } }) as { ok?: boolean; token?: string }; this.token = result.ok ? result.token : undefined; return Boolean(this.token) }
   async changePin(newPin: string): Promise<void> { await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), adminSession: this.token, operation: 'change-pin', payload: { newPin } }); this.token = undefined }

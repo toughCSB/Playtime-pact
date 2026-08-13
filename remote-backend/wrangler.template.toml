@@ -1,0 +1,21 @@
+# Rendered by remote-backend/scripts/render-config.mjs into remote-backend/.wrangler/<env>.toml.
+# Only non-secret identifiers appear here. FCM_PRIVATE_KEY, FCM_TOKEN_ENCRYPTION_KEY and
+# PAIRING_TOKEN_SECRET are supplied exclusively through `wrangler secret put`.
+name = "${workerName}"
+main = "../src/worker.mjs"
+compatibility_date = "2026-08-04"
+
+[vars]
+MINIMUM_PARENT_CLIENT_VERSION = "1"
+SETUP_AUTHORITY_ID = "${setupAuthorityActorId}"
+FCM_PROJECT_ID = "${firebaseProjectId}"
+FCM_CLIENT_EMAIL = "${firebaseClientEmail}"
+STAGING_OPERATOR_CLEANUP_ENABLED = "false"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "${d1DatabaseName}"
+database_id = "${d1DatabaseId}"
+
+[triggers]
+crons = ["*/1 * * * *"]

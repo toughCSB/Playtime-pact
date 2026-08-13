@@ -158,12 +158,23 @@ public final class ParentAppInstrumentedTest {
     expectReject(() -> UpdateVerifier.verifyApk(apk, update));
     expectReject(() -> UpdateVerifier.verifySignerLineage(context.getPackageManager(), context.getPackageName(), apk, update));
   }
-  @Test public void updateConfigurationIsFailClosedByDefault() throws Exception {
+  @Test public void buildConfigurationMatchesFcmMode() throws Exception {
     assertTrue(!UpdateVerifier.isConfigured("", ""));
     assertTrue(UpdateVerifier.isConfigured("https://updates.example/manifest.json", "pinned-key"));
     expectReject(() -> UpdateVerifier.fetchManifest("", "", 1));
-    assertTrue(BuildConfig.UPDATE_MANIFEST_URL.isEmpty());
-    assertTrue(BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY.isEmpty());
+    assertEquals(
+        !BuildConfig.UPDATE_MANIFEST_URL.isEmpty() && !BuildConfig.UPDATE_PUBLIC_KEY_B64.isEmpty(),
+        UpdateVerifier.isConfigured(BuildConfig.UPDATE_MANIFEST_URL, BuildConfig.UPDATE_PUBLIC_KEY_B64));
+    Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    if (BuildConfig.FCM_ENABLED) {
+      assertTrue(!BuildConfig.FIREBASE_API_KEY.isEmpty());
+      assertTrue(!BuildConfig.FIREBASE_APPLICATION_ID.isEmpty());
+      assertTrue(!BuildConfig.FIREBASE_PROJECT_ID.isEmpty());
+      assertTrue(!BuildConfig.FIREBASE_SENDER_ID.isEmpty());
+      assertTrue(FirebaseBootstrap.ensureInitialized(context));
+    } else {
+      assertTrue(!FirebaseBootstrap.ensureInitialized(context));
+    }
   }
   @Test public void signerRotationRequiresOrderedInstalledPrefix() {
     assertTrue(UpdateVerifier.isAllowedRotation(new String[]{"old"},new String[]{"old"}));
