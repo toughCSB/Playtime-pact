@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
-import { join, resolve } from 'node:path'
+import { join, resolve, win32 } from 'node:path'
 import koffi from 'koffi'
 import { verifyAdminPassword, writeAdminPasswordPin } from '../fileStore'
 import type { ProtectedAccountingHighWater, ProtectedAccountingScope, RemoteApprovalAuthoritySnapshot, RemoteApprovalPermissionTuple } from '../../shared/types'
@@ -238,6 +238,13 @@ const RegCloseKey = advapi32 && advapi32.func('int32_t __stdcall RegCloseKey(voi
 const SecurityAttributes = process.platform === 'win32'
   ? koffi.struct('PPT_SECURITY_ATTRIBUTES', { nLength: 'uint32_t', lpSecurityDescriptor: 'void *', bInheritHandle: 'int32_t' })
   : null
+const ProcessEntry32W = process.platform === 'win32'
+  ? koffi.struct('PPT_PROCESSENTRY32W', {
+      dwSize: 'uint32_t', cntUsage: 'uint32_t', th32ProcessID: 'uint32_t', th32DefaultHeapID: 'uintptr_t',
+      th32ModuleID: 'uint32_t', cntThreads: 'uint32_t', th32ParentProcessID: 'uint32_t', pcPriClassBase: 'int32_t',
+      dwFlags: 'uint32_t', szExeFile: 'uint16_t[260]',
+    })
+  : null
 const CreateNamedPipeW = kernel32 && kernel32.func('void * __stdcall CreateNamedPipeW(str16 Name, uint32_t OpenMode, uint32_t PipeMode, uint32_t MaxInstances, uint32_t OutBufferSize, uint32_t InBufferSize, uint32_t DefaultTimeout, PPT_SECURITY_ATTRIBUTES * SecurityAttributes)')
 const CreateFileW = kernel32 && kernel32.func('void * __stdcall CreateFileW(str16 Name, uint32_t DesiredAccess, uint32_t ShareMode, void * SecurityAttributes, uint32_t CreationDisposition, uint32_t Flags, void * TemplateFile)')
 const ConnectNamedPipe = kernel32 && kernel32.func('bool __stdcall ConnectNamedPipe(void * Pipe, void * Overlapped)')
@@ -256,15 +263,20 @@ const OpenServiceW = advapi32 && advapi32.func('void * __stdcall OpenServiceW(vo
 const QueryServiceStatusEx = advapi32 && advapi32.func('bool __stdcall QueryServiceStatusEx(void * Service, uint32_t InfoLevel, void * Buffer, uint32_t BufferSize, uint32_t * BytesNeeded)')
 const OpenProcess = kernel32 && kernel32.func('void * __stdcall OpenProcess(uint32_t Access, bool Inherit, uint32_t ProcessId)')
 const QueryFullProcessImageNameW = kernel32 && kernel32.func('bool __stdcall QueryFullProcessImageNameW(void * Process, uint32_t Flags, uint16_t * Name, uint32_t * Size)')
+const CreateToolhelp32Snapshot = kernel32 && kernel32.func('void * __stdcall CreateToolhelp32Snapshot(uint32_t Flags, uint32_t ProcessId)')
+const Process32FirstW = kernel32 && kernel32.func('bool __stdcall Process32FirstW(void * Snapshot, _Inout_ PPT_PROCESSENTRY32W * Entry)')
+const Process32NextW = kernel32 && kernel32.func('bool __stdcall Process32NextW(void * Snapshot, _Inout_ PPT_PROCESSENTRY32W * Entry)')
 const CloseHandle = kernel32 && kernel32.func('bool __stdcall CloseHandle(void * Handle)')
 
+const WINDOWS_SERVICE_NAME = 'PlaytimePactPrivilegedBroker'
+const WINDOWS_SERVICE_RUNNING = 4
 const invalidWindowsHandle = (handle: unknown) => !handle || handle === -1n || handle === 0xffffffffffffffffn || handle === 0xffffffffn
+const normalizeWindowsImage = (image: string) => win32.normalize(image).toLowerCase()
+type WindowsProcessIdentity = { processId: number; parentProcessId: number | null; image: string }
+type WindowsServiceIdentity = { name: string; state: number; processId: number; image: string | null }
 
-function windowsProcessForPipe(handle: unknown, getProcessId: typeof GetNamedPipeClientProcessId, installedExecutable: string): { id: number; peer: string } | null {
-  if (!getProcessId || !OpenProcess || !QueryFullProcessImageNameW || !CloseHandle) return null
-  const pid = Buffer.alloc(4)
-  if (!getProcessId(handle, pid) || pid.readUInt32LE(0) === 0) return null
-  const processId = pid.readUInt32LE(0)
+function windowsProcessImage(processId: number): string | null {
+  if (!OpenProcess || !QueryFullProcessImageNameW || !CloseHandle) return null
   const processHandle = OpenProcess(0x1000, false, processId)
   if (invalidWindowsHandle(processHandle)) return null
   try {
@@ -272,32 +284,68 @@ function windowsProcessForPipe(handle: unknown, getProcessId: typeof GetNamedPip
     const length = Buffer.alloc(4)
     length.writeUInt32LE(16384)
     if (!QueryFullProcessImageNameW(processHandle, 0, path, length)) return null
-    const image = path.subarray(0, length.readUInt32LE(0) * 2).toString('utf16le').replace(/\0+$/, '')
-    const expected = resolve(installedExecutable).toLowerCase()
-    return resolve(image).toLowerCase() === expected ? { id: processId, peer: `${processId}:${expected}` } : null
+    return path.subarray(0, length.readUInt32LE(0) * 2).toString('utf16le').replace(/\0+$/, '')
   } finally {
     CloseHandle(processHandle)
   }
 }
 
-function windowsServiceProcessId(): number | null {
+function windowsParentProcessId(processId: number): number | null {
+  if (!CreateToolhelp32Snapshot || !Process32FirstW || !Process32NextW || !CloseHandle || !ProcessEntry32W) return null
+  const snapshot = CreateToolhelp32Snapshot(0x00000002, 0)
+  if (invalidWindowsHandle(snapshot)) return null
+  try {
+    const entry = { dwSize: koffi.sizeof(ProcessEntry32W) } as { dwSize: number; th32ProcessID?: number; th32ParentProcessID?: number }
+    for (let found = Process32FirstW(snapshot, entry); found; found = Process32NextW(snapshot, entry)) {
+      if (entry.th32ProcessID === processId) return entry.th32ParentProcessID || null
+      entry.dwSize = koffi.sizeof(ProcessEntry32W)
+    }
+    return null
+  } finally {
+    CloseHandle(snapshot)
+  }
+}
+
+function windowsProcessForPipe(handle: unknown, getProcessId: typeof GetNamedPipeClientProcessId, installedExecutable: string): { id: number; image: string; peer: string } | null {
+  if (!getProcessId) return null
+  const pid = Buffer.alloc(4)
+  if (!getProcessId(handle, pid) || pid.readUInt32LE(0) === 0) return null
+  const processId = pid.readUInt32LE(0)
+  const image = windowsProcessImage(processId)
+  const expected = normalizeWindowsImage(installedExecutable)
+  return image && normalizeWindowsImage(image) === expected ? { id: processId, image, peer: `${processId}:${expected}` } : null
+}
+
+function windowsServiceIdentity(): WindowsServiceIdentity | null {
   if (!OpenSCManagerW || !OpenServiceW || !QueryServiceStatusEx || !CloseHandle) return null
   const manager = OpenSCManagerW(null, null, 0x0001)
   if (invalidWindowsHandle(manager)) return null
   try {
-    const service = OpenServiceW(manager, 'PlaytimePactPrivilegedBroker', 0x0004)
+    const service = OpenServiceW(manager, WINDOWS_SERVICE_NAME, 0x0004)
     if (invalidWindowsHandle(service)) return null
     try {
       const status = Buffer.alloc(36)
       const needed = Buffer.alloc(4)
-      if (!QueryServiceStatusEx(service, 0, status, status.length, needed) || status.readUInt32LE(4) !== 4) return null
-      return status.readUInt32LE(28) || null
+      if (!QueryServiceStatusEx(service, 0, status, status.length, needed)) return null
+      const processId = status.readUInt32LE(28)
+      return { name: WINDOWS_SERVICE_NAME, state: status.readUInt32LE(4), processId, image: processId ? windowsProcessImage(processId) : null }
     } finally {
       CloseHandle(service)
     }
   } finally {
     CloseHandle(manager)
   }
+}
+
+export function windowsServiceOwnsPipeServer(service: WindowsServiceIdentity | null, server: WindowsProcessIdentity | null, installedExecutable: string): boolean {
+  if (!service || !server || service.name !== WINDOWS_SERVICE_NAME || service.state !== WINDOWS_SERVICE_RUNNING || service.processId === 0) return false
+  const expectedServer = normalizeWindowsImage(installedExecutable)
+  if (normalizeWindowsImage(server.image) !== expectedServer) return false
+  if (service.processId === server.processId) return service.image !== null && normalizeWindowsImage(service.image) === expectedServer
+  const expectedWrapper = normalizeWindowsImage(win32.join(win32.dirname(installedExecutable), `${WINDOWS_SERVICE_NAME}.exe`))
+  return server.parentProcessId === service.processId
+    && service.image !== null
+    && normalizeWindowsImage(service.image) === expectedWrapper
 }
 export function privilegedPipeSddl(targetAccountSid = 'IU'): string {
   if (targetAccountSid !== 'IU' && !/^S-1-5-(?:\d+-){1,14}\d+$/.test(targetAccountSid)) throw new Error('Protected named-pipe account SID invalid')
@@ -744,7 +792,11 @@ function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServic
     }
     timer = setTimeout(() => fail(Object.assign(new Error('Privileged service timeout'), { code: 'UNAVAILABLE' })), timeout)
     const server = windowsProcessForPipe(handle, GetNamedPipeServerProcessId, process.execPath)
-    if (!server || (requireServiceIdentity && windowsServiceProcessId() !== server.id)) {
+    if (!server || (requireServiceIdentity && !windowsServiceOwnsPipeServer(windowsServiceIdentity(), {
+      processId: server.id,
+      parentProcessId: windowsParentProcessId(server.id),
+      image: server.image,
+    }, process.execPath))) {
       fail(Object.assign(new Error('Privileged service identity denied'), { code: 'UNAVAILABLE' }))
       return
     }

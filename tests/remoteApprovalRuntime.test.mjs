@@ -10,7 +10,7 @@ import { RemoteApprovalApiClient, RemoteApprovalClientError } from '../src/main/
 import { loadRemoteApprovalRuntimeConfig, WindowsCngRemoteApprovalBroker } from '../src/main/remoteApproval/runtimeBroker'
 import { ServerClock } from '../src/main/remoteApproval/serverClock'
 import { RemoteStartCoordinator } from '../src/main/remoteApproval/startCoordinator'
-import { PRIVILEGED_PIPE, PrivilegedApprovalService, PrivilegedBrokerClient, namedPipeTransport, startPrivilegedPipeServer } from '../src/main/remoteApproval/privilegedService'
+import { PRIVILEGED_PIPE, PrivilegedApprovalService, PrivilegedBrokerClient, namedPipeTransport, startPrivilegedPipeServer, windowsServiceOwnsPipeServer } from '../src/main/remoteApproval/privilegedService'
 
 const accounting = { commitTimerStart: async () => {}, listRecoverableTimerStarts: async () => [], acknowledgeTimerMaterialized: async () => {} }
 const authority = (membershipEpoch = 3, serviceEpoch = 7, authorityGeneration = 1) => ({ membershipEpoch, serviceEpoch, authorityGeneration })
@@ -239,6 +239,32 @@ describe('runtime remote approval broker', () => {
     } finally {
       await new Promise((resolve) => server.close(resolve))
       rmSync(directory, { recursive: true, force: true })
+    }
+  })
+  it('anchors an installed broker to either the SCM process or its direct WinSW child only', () => {
+    const installedExecutable = 'C:\\Program Files\\Playtime Pact\\Playtime Pact.exe'
+    const wrapperImage = 'C:\\Program Files\\Playtime Pact\\PlaytimePactPrivilegedBroker.exe'
+    const service = { name: 'PlaytimePactPrivilegedBroker', state: 4, processId: 200, image: wrapperImage }
+    const server = { processId: 300, parentProcessId: 200, image: installedExecutable }
+
+    expect(windowsServiceOwnsPipeServer(service, server, installedExecutable)).toBe(true)
+    expect(windowsServiceOwnsPipeServer(
+      { ...service, processId: 300, image: installedExecutable },
+      server,
+      installedExecutable,
+    )).toBe(true)
+
+    const rejected = [
+      ['unrelated same-image process', service, { ...server, processId: 301, parentProcessId: 777 }],
+      ['grandchild', service, { ...server, parentProcessId: 250 }],
+      ['stopped service', { ...service, state: 1 }, server],
+      ['wrong parent', { ...service, processId: 201 }, server],
+      ['wrong wrapper image', { ...service, image: 'C:\\Windows\\System32\\winsw.exe' }, server],
+      ['wrong service identity', { ...service, name: 'UnrelatedPrivilegedBroker' }, server],
+      ['wrong Electron image', service, { ...server, image: 'C:\\Program Files\\Playtime Pact\\Unrelated Electron.exe' }],
+    ]
+    for (const [reason, candidateService, candidateServer] of rejected) {
+      expect(windowsServiceOwnsPipeServer(candidateService, candidateServer, installedExecutable), reason).toBe(false)
     }
   })
   ;(process.platform === 'win32' ? it : it.skip)('authenticates a real Windows pipe client from its native process handle', async () => {
