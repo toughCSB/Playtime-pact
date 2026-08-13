@@ -262,6 +262,7 @@ const GetNamedPipeServerProcessId = kernel32 && kernel32.func('bool __stdcall Ge
 const OpenSCManagerW = advapi32 && advapi32.func('void * __stdcall OpenSCManagerW(str16 MachineName, str16 DatabaseName, uint32_t DesiredAccess)')
 const OpenServiceW = advapi32 && advapi32.func('void * __stdcall OpenServiceW(void * Manager, str16 ServiceName, uint32_t DesiredAccess)')
 const QueryServiceStatusEx = advapi32 && advapi32.func('bool __stdcall QueryServiceStatusEx(void * Service, uint32_t InfoLevel, void * Buffer, uint32_t BufferSize, uint32_t * BytesNeeded)')
+const QueryServiceConfigW = advapi32 && advapi32.func('bool __stdcall QueryServiceConfigW(void * Service, void * Config, uint32_t BufferSize, uint32_t * BytesNeeded)')
 const OpenProcess = kernel32 && kernel32.func('void * __stdcall OpenProcess(uint32_t Access, bool Inherit, uint32_t ProcessId)')
 const QueryFullProcessImageNameW = kernel32 && kernel32.func('bool __stdcall QueryFullProcessImageNameW(void * Process, uint32_t Flags, uint16_t * Name, uint32_t * Size)')
 const CreateToolhelp32Snapshot = kernel32 && kernel32.func('void * __stdcall CreateToolhelp32Snapshot(uint32_t Flags, uint32_t ProcessId)')
@@ -273,8 +274,8 @@ const WINDOWS_SERVICE_NAME = 'PlaytimePactPrivilegedBroker'
 const WINDOWS_SERVICE_RUNNING = 4
 const invalidWindowsHandle = (handle: unknown) => !handle || handle === -1n || handle === 0xffffffffffffffffn || handle === 0xffffffffn
 const normalizeWindowsImage = (image: string) => win32.normalize(image).toLowerCase()
-type WindowsProcessIdentity = { processId: number; parentProcessId: number | null; image: string }
-type WindowsServiceIdentity = { name: string; state: number; processId: number; image: string | null }
+type WindowsProcessIdentity = { processId: number; parentProcessId: number | null; image: string | null }
+type WindowsServiceIdentity = { name: string; state: number; processId: number; image: string | null; configuredBinaryPath: string | null }
 
 function windowsProcessImage(processId: number): string | null {
   if (!OpenProcess || !QueryFullProcessImageNameW || !CloseHandle) return null
@@ -307,29 +308,76 @@ function windowsParentProcessId(processId: number): number | null {
   }
 }
 
-function windowsProcessForPipe(handle: unknown, getProcessId: typeof GetNamedPipeClientProcessId, installedExecutable: string): { id: number; image: string; peer: string } | null {
+type WindowsPipeProcess = { id: number; image: string | null }
+function windowsPipeProcess(handle: unknown, getProcessId: typeof GetNamedPipeClientProcessId): WindowsPipeProcess | null {
   if (!getProcessId) return null
   const pid = Buffer.alloc(4)
-  if (!getProcessId(handle, pid) || pid.readUInt32LE(0) === 0) return null
+  if (!getProcessId(handle, pid)) return null
   const processId = pid.readUInt32LE(0)
-  const image = windowsProcessImage(processId)
+  return processId === 0 ? null : { id: processId, image: windowsProcessImage(processId) }
+}
+
+function windowsProcessForPipe(handle: unknown, getProcessId: typeof GetNamedPipeClientProcessId, installedExecutable: string): { id: number; image: string; peer: string } | null {
+  const process = windowsPipeProcess(handle, getProcessId)
   const expected = normalizeWindowsImage(installedExecutable)
-  return image && normalizeWindowsImage(image) === expected ? { id: processId, image, peer: `${processId}:${expected}` } : null
+  return process?.image && normalizeWindowsImage(process.image) === expected
+    ? { id: process.id, image: process.image, peer: `${process.id}:${expected}` }
+    : null
+}
+
+const MAX_SERVICE_CONFIG_BYTES = 64 * 1024
+function windowsServiceConfiguredBinary(service: unknown): string | null {
+  if (!QueryServiceConfigW || !GetLastError) return null
+  const needed = Buffer.alloc(4)
+  if (QueryServiceConfigW(service, null, 0, needed) || GetLastError() !== 122) return null
+  const size = needed.readUInt32LE(0)
+  const pointerOffset = process.arch === 'x64' ? 16 : 12
+  const headerSize = process.arch === 'x64' ? 64 : 36
+  const pointerSize = process.arch === 'x64' ? 8 : 4
+  if (size < headerSize || size > MAX_SERVICE_CONFIG_BYTES) return null
+  const config = Buffer.alloc(size)
+  if (!QueryServiceConfigW(service, config, config.length, needed)) return null
+  const base = koffi.address(config)
+  const pointer = pointerSize === 8 ? config.readBigUInt64LE(pointerOffset) : BigInt(config.readUInt32LE(pointerOffset))
+  const endAddress = base + BigInt(config.length)
+  if (pointer < base + BigInt(headerSize) || pointer >= endAddress) return null
+  const offset = Number(pointer - base)
+  if (offset % 2 !== 0) return null
+  let end = offset
+  while (end + 1 < config.length && config.readUInt16LE(end) !== 0) end += 2
+  if (end + 1 >= config.length || end === offset) return null
+  return config.subarray(offset, end).toString('utf16le')
+}
+
+function windowsServiceStatus(service: unknown): { state: number; processId: number } | null {
+  if (!QueryServiceStatusEx) return null
+  const status = Buffer.alloc(36)
+  const needed = Buffer.alloc(4)
+  if (!QueryServiceStatusEx(service, 0, status, status.length, needed)) return null
+  return { state: status.readUInt32LE(4), processId: status.readUInt32LE(28) }
 }
 
 function windowsServiceIdentity(): WindowsServiceIdentity | null {
-  if (!OpenSCManagerW || !OpenServiceW || !QueryServiceStatusEx || !CloseHandle) return null
+  if (!OpenSCManagerW || !OpenServiceW || !QueryServiceStatusEx || !QueryServiceConfigW || !CloseHandle) return null
   const manager = OpenSCManagerW(null, null, 0x0001)
   if (invalidWindowsHandle(manager)) return null
   try {
-    const service = OpenServiceW(manager, WINDOWS_SERVICE_NAME, 0x0004)
+    const service = OpenServiceW(manager, WINDOWS_SERVICE_NAME, 0x0004 | 0x0001)
     if (invalidWindowsHandle(service)) return null
     try {
-      const status = Buffer.alloc(36)
-      const needed = Buffer.alloc(4)
-      if (!QueryServiceStatusEx(service, 0, status, status.length, needed)) return null
-      const processId = status.readUInt32LE(28)
-      return { name: WINDOWS_SERVICE_NAME, state: status.readUInt32LE(4), processId, image: processId ? windowsProcessImage(processId) : null }
+      const before = windowsServiceStatus(service)
+      if (!before || before.state !== WINDOWS_SERVICE_RUNNING || before.processId === 0) return null
+      const configuredBinaryPath = windowsServiceConfiguredBinary(service)
+      if (!configuredBinaryPath) return null
+      const after = windowsServiceStatus(service)
+      if (!after || after.state !== before.state || after.processId !== before.processId) return null
+      return {
+        name: WINDOWS_SERVICE_NAME,
+        state: after.state,
+        processId: after.processId,
+        image: windowsProcessImage(after.processId),
+        configuredBinaryPath,
+      }
     } finally {
       CloseHandle(service)
     }
@@ -338,15 +386,29 @@ function windowsServiceIdentity(): WindowsServiceIdentity | null {
   }
 }
 
+function configuredServiceBinaryMatches(configuredBinaryPath: string | null, expectedImage: string): boolean {
+  if (!configuredBinaryPath || configuredBinaryPath.includes('\0')) return false
+  const quoted = configuredBinaryPath.startsWith('"') && configuredBinaryPath.endsWith('"')
+  const candidate = quoted ? configuredBinaryPath.slice(1, -1) : configuredBinaryPath
+  if (!candidate || candidate.includes('"') || !quoted && /\s/.test(candidate)) return false
+  return normalizeWindowsImage(candidate) === normalizeWindowsImage(expectedImage)
+}
+
 export function windowsServiceOwnsPipeServer(service: WindowsServiceIdentity | null, server: WindowsProcessIdentity | null, installedExecutable: string): boolean {
-  if (!service || !server || service.name !== WINDOWS_SERVICE_NAME || service.state !== WINDOWS_SERVICE_RUNNING || service.processId === 0) return false
+  if (!service || !server || service.name !== WINDOWS_SERVICE_NAME || service.state !== WINDOWS_SERVICE_RUNNING
+    || service.processId === 0 || server.processId === 0) return false
   const expectedServer = normalizeWindowsImage(installedExecutable)
-  if (normalizeWindowsImage(server.image) !== expectedServer) return false
-  if (service.processId === server.processId) return service.image !== null && normalizeWindowsImage(service.image) === expectedServer
-  const expectedWrapper = normalizeWindowsImage(win32.join(win32.dirname(installedExecutable), `${WINDOWS_SERVICE_NAME}.exe`))
+  if (server.image !== null && normalizeWindowsImage(server.image) !== expectedServer) return false
+  if (service.processId === server.processId) {
+    return server.image !== null
+      && service.image !== null
+      && normalizeWindowsImage(service.image) === expectedServer
+      && configuredServiceBinaryMatches(service.configuredBinaryPath, installedExecutable)
+  }
+  const expectedWrapper = win32.join(win32.dirname(installedExecutable), `${WINDOWS_SERVICE_NAME}.exe`)
   return server.parentProcessId === service.processId
-    && service.image !== null
-    && normalizeWindowsImage(service.image) === expectedWrapper
+    && configuredServiceBinaryMatches(service.configuredBinaryPath, expectedWrapper)
+    && (service.image === null || normalizeWindowsImage(service.image) === normalizeWindowsImage(expectedWrapper))
 }
 export function privilegedPipeSddl(targetAccountSid = 'IU'): string {
   if (targetAccountSid !== 'IU' && !/^S-1-5-(?:\d+-){1,14}\d+$/.test(targetAccountSid)) throw new Error('Protected named-pipe account SID invalid')
@@ -798,17 +860,29 @@ function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServic
       if (close()) ok(value)
     }
     timer = setTimeout(() => fail(privilegedHealthFailure('response-read', 'RESPONSE_TIMEOUT', 'Privileged service timeout')), timeout)
-    const server = windowsProcessForPipe(handle, GetNamedPipeServerProcessId, process.execPath)
-    if (!server) {
+    if (requireServiceIdentity) {
+      const server = windowsPipeProcess(handle, GetNamedPipeServerProcessId)
+      if (!server) {
+        fail(privilegedHealthFailure('server-identity', 'SERVER_IDENTITY_UNAVAILABLE', 'Privileged service identity unavailable'))
+        return
+      }
+      const service = windowsServiceIdentity()
+      const parentProcessId = windowsParentProcessId(server.id)
+      const confirmedServer = windowsPipeProcess(handle, GetNamedPipeServerProcessId)
+      const confirmedService = windowsServiceIdentity()
+      const serviceStable = service && confirmedService
+        && service.name === confirmedService.name
+        && service.state === confirmedService.state
+        && service.processId === confirmedService.processId
+        && service.configuredBinaryPath === confirmedService.configuredBinaryPath
+      if (!serviceStable || !confirmedServer || confirmedServer.id !== server.id
+        || !windowsServiceOwnsPipeServer(confirmedService, { processId: server.id, parentProcessId, image: server.image }, process.execPath)
+        || !windowsServiceOwnsPipeServer(confirmedService, { processId: confirmedServer.id, parentProcessId, image: confirmedServer.image }, process.execPath)) {
+        fail(privilegedHealthFailure('scm-lineage', 'SCM_LINEAGE_MISMATCH', 'Privileged service identity denied'))
+        return
+      }
+    } else if (!windowsProcessForPipe(handle, GetNamedPipeServerProcessId, process.execPath)) {
       fail(privilegedHealthFailure('server-identity', 'SERVER_IDENTITY_UNAVAILABLE', 'Privileged service identity unavailable'))
-      return
-    }
-    if (requireServiceIdentity && !windowsServiceOwnsPipeServer(windowsServiceIdentity(), {
-      processId: server.id,
-      parentProcessId: windowsParentProcessId(server.id),
-      image: server.image,
-    }, process.execPath)) {
-      fail(privilegedHealthFailure('scm-lineage', 'SCM_LINEAGE_MISMATCH', 'Privileged service identity denied'))
       return
     }
     const output = frame(request)

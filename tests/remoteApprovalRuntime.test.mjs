@@ -297,12 +297,13 @@ describe('runtime remote approval broker', () => {
   it('anchors an installed broker to either the SCM process or its direct WinSW child only', () => {
     const installedExecutable = 'C:\\Program Files\\Playtime Pact\\Playtime Pact.exe'
     const wrapperImage = 'C:\\Program Files\\Playtime Pact\\PlaytimePactPrivilegedBroker.exe'
-    const service = { name: 'PlaytimePactPrivilegedBroker', state: 4, processId: 200, image: wrapperImage }
+    const service = { name: 'PlaytimePactPrivilegedBroker', state: 4, processId: 200, image: wrapperImage, configuredBinaryPath: `"${wrapperImage}"` }
     const server = { processId: 300, parentProcessId: 200, image: installedExecutable }
 
     expect(windowsServiceOwnsPipeServer(service, server, installedExecutable)).toBe(true)
+    expect(windowsServiceOwnsPipeServer(service, { ...server, image: null }, installedExecutable), 'access-denied SYSTEM child image').toBe(true)
     expect(windowsServiceOwnsPipeServer(
-      { ...service, processId: 300, image: installedExecutable },
+      { ...service, processId: 300, image: installedExecutable, configuredBinaryPath: `"${installedExecutable}"` },
       server,
       installedExecutable,
     )).toBe(true)
@@ -312,9 +313,16 @@ describe('runtime remote approval broker', () => {
       ['grandchild', service, { ...server, parentProcessId: 250 }],
       ['stopped service', { ...service, state: 1 }, server],
       ['wrong parent', { ...service, processId: 201 }, server],
-      ['wrong wrapper image', { ...service, image: 'C:\\Windows\\System32\\winsw.exe' }, server],
+      ['wrong configured binary', { ...service, configuredBinaryPath: 'C:\\Windows\\System32\\winsw.exe' }, server],
+      ['quoted arguments', { ...service, configuredBinaryPath: `"${wrapperImage}" --service` }, server],
+      ['malformed configuration', { ...service, configuredBinaryPath: `"${wrapperImage}` }, server],
+      ['missing configuration', { ...service, configuredBinaryPath: null }, server],
+      ['wrong accessible wrapper image', { ...service, image: 'C:\\Windows\\System32\\winsw.exe' }, server],
       ['wrong service identity', { ...service, name: 'UnrelatedPrivilegedBroker' }, server],
-      ['wrong Electron image', service, { ...server, image: 'C:\\Program Files\\Playtime Pact\\Unrelated Electron.exe' }],
+      ['wrong accessible Electron image', service, { ...server, image: 'C:\\Program Files\\Playtime Pact\\Unrelated Electron.exe' }],
+      ['zero service PID', { ...service, processId: 0 }, server],
+      ['zero server PID', service, { ...server, processId: 0 }],
+      ['same/reused PID cannot become a child', service, { ...server, processId: 200, parentProcessId: 200, image: null }],
     ]
     for (const [reason, candidateService, candidateServer] of rejected) {
       expect(windowsServiceOwnsPipeServer(candidateService, candidateServer, installedExecutable), reason).toBe(false)
@@ -335,11 +343,12 @@ describe('runtime remote approval broker', () => {
   })
   ;(process.platform === 'win32' ? it : it.skip)('rejects a native broker that is not the running SCM service before sending a request', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-unregistered-pipe-'))
+    const pipe = `${PRIVILEGED_PIPE}-unregistered-${process.pid}`
     const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), PrivilegedApprovalService.loadAccounting(directory), directory)
-    const server = await startPrivilegedPipeServer(service)
+    const server = await startPrivilegedPipeServer(service, pipe)
     try {
       const request = { capability: 'accounting', purpose: 'start-accounting', nonce: 'S'.repeat(16), operation: 'read', payload: { scope: accountingScope } }
-      const error = await namedPipeTransport()(request).catch((cause) => cause)
+      const error = await namedPipeTransport(pipe, 5_000, true)(request).catch((cause) => cause)
       expect(error).toMatchObject({ code: 'UNAVAILABLE' })
       expect(formatPrivilegedHealthDiagnostic(error)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=scm-lineage code=SCM_LINEAGE_MISMATCH\n')
     } finally {
