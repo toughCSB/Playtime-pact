@@ -45,8 +45,7 @@
   ExecWait `icacls.exe C:\ProgramData\PlaytimePact\Broker /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /T /C`
   ExecWait `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$$p='C:\ProgramData\PlaytimePact\Admin\admin-secret.json'; $$default='9af15b336e6a9619928537df30b2e6a2376569fcf9d7e773eccede65606529a0'; $$rewrite=$$false; if (!(Test-Path -LiteralPath $$p)) { $$rewrite=$$true } else { try { $$parsed=Get-Content -LiteralPath $$p -Raw | ConvertFrom-Json } catch { $$parsed=$$null }; if ($$null -ne $$parsed -and $$parsed.adminPasswordHash -eq $$default) { $$rewrite=$$true } }; if ($$rewrite) { $$salt=New-Object byte[] 16; $$rng=[System.Security.Cryptography.RNGCryptoServiceProvider]::new(); $$rng.GetBytes($$salt); $$rng.Dispose(); $$derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new('0000',$$salt,1500000,[System.Security.Cryptography.HashAlgorithmName]::SHA256); $$hash=($$derive.GetBytes(32) | ForEach-Object { $$_.ToString('x2') }) -join ''; $$derive.Dispose(); $$secret=[ordered]@{ schemaVersion=1; algorithm='pbkdf2-sha256'; iterations=1500000; salt=[Convert]::ToBase64String($$salt); hash=$$hash } | ConvertTo-Json -Compress; [System.IO.File]::WriteAllText($$p,$$secret,[System.Text.UTF8Encoding]::new($$false)) }"`
   ExecWait `icacls.exe C:\ProgramData\PlaytimePact\Admin\admin-secret.json /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F /C`
-  ExecWait `sc.exe stop PlaytimePactPrivilegedBroker`
-  ExecWait `sc.exe delete PlaytimePactPrivilegedBroker`
+  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop'
   CopyFiles /SILENT "$INSTDIR\resources\app.asar.unpacked\node_modules\node-windows\bin\winsw\winsw.exe" "$INSTDIR\PlaytimePactPrivilegedBroker.exe"
   CopyFiles /SILENT "$INSTDIR\resources\app.asar.unpacked\node_modules\node-windows\bin\winsw\winsw.exe.config" "$INSTDIR\PlaytimePactPrivilegedBroker.exe.config"
   FileOpen $R1 "$INSTDIR\PlaytimePactPrivilegedBroker.xml" w
@@ -66,10 +65,15 @@
   FileWrite $R1 '  <onfailure action="restart" delay="5 sec" />$\r$\n'
   FileWrite $R1 '</service>$\r$\n'
   FileClose $R1
-  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" install' $R5
-  ${If} $R5 != 0
-    MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be installed."
-    Abort
+  nsExec::ExecToStack 'sc.exe query PlaytimePactPrivilegedBroker'
+  Pop $R4
+  Pop $R3
+  ${If} $R4 != 0
+    ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" install' $R5
+    ${If} $R5 != 0
+      MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be installed."
+      Abort
+    ${EndIf}
   ${EndIf}
   ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" start' $R5
   ${If} $R5 != 0
@@ -77,7 +81,9 @@
     MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be started."
     Abort
   ${EndIf}
-  ExecWait `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$$deadline=[DateTime]::UtcNow.AddSeconds(20); do { & '$INSTDIR\Playtime Pact.exe' --privileged-broker-health-check; if ($$LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Milliseconds 250 } while ([DateTime]::UtcNow -lt $$deadline); exit 42"` $R5
+  nsExec::ExecToStack '"$INSTDIR\Playtime Pact.exe" --privileged-broker-health-check'
+  Pop $R5
+  Pop $R4
   ${If} $R5 != 0
     ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop'
     ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" uninstall'

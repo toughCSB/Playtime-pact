@@ -5,6 +5,9 @@ import { isAbsolute, join } from 'node:path'
 
 const packageJson = JSON.parse(readFileSync('package.json', 'utf8'))
 const installerScript = readFileSync('build/installer.nsh', 'utf8')
+const mainProcessSource = readFileSync('src/main/main.ts', 'utf8')
+const privilegedServiceSource = readFileSync('src/main/remoteApproval/privilegedService.ts', 'utf8')
+const watchdogLauncher = readFileSync('resources/start-watch-loop.vbs', 'utf8')
 const watchLoopScript = readFileSync('resources/watch-loop.ps1', 'utf8')
 const watchdogScript = readFileSync('resources/watchdog.ps1', 'utf8')
 const signatureVerifier = readFileSync('scripts/verify-win-signature.mjs', 'utf8')
@@ -52,6 +55,18 @@ describe('packaged Playtime Pact identity surfaces', () => {
 
 
   it('points watchdog scripts at the Playtime Pact executable and storage root', () => {
+    expect(watchdogLauncher).toContain('Playtime Pact.exe')
+    expect(watchdogLauncher).toContain('Win32_Process')
+    expect(watchdogLauncher).toContain('WScript.Sleep 3000')
+    expect(watchdogLauncher).toContain('PlaytimePactWatchdog-')
+    expect(watchdogLauncher).toContain('fso.CreateFolder lockPath')
+    expect(watchdogLauncher).not.toContain('powershell.exe')
+    expect(watchdogLauncher).not.toContain('watch-loop.ps1')
+    expect(mainProcessSource).toContain("spawn('wscript.exe'")
+    expect(mainProcessSource).toContain('detached: true')
+    expect(mainProcessSource).toContain("process.argv.includes('--from-watchdog')")
+    expect(mainProcessSource).not.toContain('exec(`wscript.exe')
+
     expect(watchLoopScript).toContain('Playtime Pact.exe')
     expect(watchLoopScript).toContain('Playtime Pact')
     expect(watchLoopScript).toContain('PlaytimePactWatchdog')
@@ -86,6 +101,10 @@ describe('packaged Playtime Pact identity surfaces', () => {
   })
 
   it('creates new installer/runtime identity surfaces while failing closed on active legacy remnants', () => {
+    const customInstallStart = installerScript.indexOf('!macro customInstall')
+    const customInstallEnd = installerScript.indexOf('!macroend', customInstallStart)
+    const customInstall = installerScript.slice(customInstallStart, customInstallEnd)
+
     expect(installerScript).toContain('WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "PlaytimePact"')
     expect(installerScript).toContain('schtasks /create /tn "PlaytimePact"')
     expect(installerScript).toContain('C:\\ProgramData\\PlaytimePact\\Admin\\admin-secret.json')
@@ -108,10 +127,16 @@ describe('packaged Playtime Pact identity surfaces', () => {
     expect(installerScript).not.toContain('<user>LocalSystem</user>')
     expect(installerScript).toContain('PlaytimePactPrivilegedBroker.exe" start')
     expect(installerScript).toContain('--privileged-broker-health-check')
+    expect(installerScript).toContain(`nsExec::ExecToStack '"$INSTDIR\\Playtime Pact.exe" --privileged-broker-health-check'`)
+    expect(installerScript).not.toContain("nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden")
     expect(installerScript).toContain('failed its IPC health check')
+    expect(customInstall).toContain('PlaytimePactPrivilegedBroker.exe" stop')
+    expect(customInstall).not.toContain('sc.exe delete PlaytimePactPrivilegedBroker')
     expect(installerScript).not.toContain('sc.exe create PlaytimePactPrivilegedBroker')
     expect(builderConfig).toContain("'node_modules/node-windows/bin/winsw/**'")
     expect(builderConfig).toContain("'!node_modules/node-windows/bin/sudowin/**'")
     expect(builderConfig).toContain("'!node_modules/node-windows/bin/elevate/**'")
+    expect(privilegedServiceSource).toContain("FlushFileBuffers = kernel32 && kernel32.func('bool __stdcall FlushFileBuffers(void * File)')")
+    expect(privilegedServiceSource).toContain('if (!writeOk || !FlushFileBuffers?.(handle))')
   })
 })

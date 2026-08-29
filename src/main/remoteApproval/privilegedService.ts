@@ -251,6 +251,7 @@ const CreateFileW = kernel32 && kernel32.func('void * __stdcall CreateFileW(str1
 const ConnectNamedPipe = kernel32 && kernel32.func('bool __stdcall ConnectNamedPipe(void * Pipe, void * Overlapped)')
 const ReadFile = kernel32 && kernel32.func('bool __stdcall ReadFile(void * File, void * Buffer, uint32_t BytesToRead, uint32_t * BytesRead, void * Overlapped)')
 const WriteFile = kernel32 && kernel32.func('bool __stdcall WriteFile(void * File, void * Buffer, uint32_t BytesToWrite, uint32_t * BytesWritten, void * Overlapped)')
+const FlushFileBuffers = kernel32 && kernel32.func('bool __stdcall FlushFileBuffers(void * File)')
 const DisconnectNamedPipe = kernel32 && kernel32.func('bool __stdcall DisconnectNamedPipe(void * Pipe)')
 const CancelIoEx = kernel32 && kernel32.func('bool __stdcall CancelIoEx(void * File, void * Overlapped)')
 const ConvertStringSecurityDescriptorToSecurityDescriptorW = advapi32 && advapi32.func('int32_t __stdcall ConvertStringSecurityDescriptorToSecurityDescriptorW(str16 Sddl, uint32_t Revision, _Out_ void ** Descriptor, uint32_t * Size)')
@@ -799,9 +800,13 @@ function startNativeWindowsPipeServer(service: PrivilegedApprovalService, pipe: 
           if (stopped || connection !== generation) return
           const output = frame(response)
           const bytesWritten = Buffer.alloc(4)
-          WriteFile.async(handle, output, output.length, bytesWritten, null, () => {
+          WriteFile.async(handle, output, output.length, bytesWritten, null, (_writeError: unknown, writeOk: boolean) => {
             if (stopped || connection !== generation) return
             clearTimeout(timer)
+            if (!writeOk || !FlushFileBuffers?.(handle)) {
+              finish()
+              return
+            }
             finish()
           })
         })

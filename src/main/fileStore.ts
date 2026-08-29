@@ -1,7 +1,6 @@
-import { homedir, tmpdir } from 'os'
+import { homedir } from 'os'
 import { join } from 'path'
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, copyFileSync, existsSync, unlinkSync, renameSync } from 'fs'
-import { execFileSync } from 'child_process'
 import { createHash, createHmac, pbkdf2Sync, randomBytes, randomUUID, timingSafeEqual } from 'crypto'
 import type { DailyUsage, GamePresenceSpan, ManagedGameId, PrimarySelectionEvent, Session, Settings, TimerState } from '../shared/types'
 
@@ -245,68 +244,12 @@ function readPersistedAdminPasswordSecret(): AdminPasswordSecret | null {
   return null
 }
 
-function verifyProtectedAdminPassword(pin: string): boolean {
-  const requestPath = join(tmpdir(), `playtime-pact-admin-verify-${randomUUID()}.json`)
-  writeFileSync(requestPath, JSON.stringify({ pin }), { encoding: 'utf-8', flag: 'wx' })
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    `$requestPath = '${requestPath.replace(/'/g, "''")}'`,
-    `$secretPath = '${ADMIN_SECRET_PATH.replace(/'/g, "''")}'`,
-    `if (!(Test-Path -LiteralPath $requestPath) -or !(Test-Path -LiteralPath $secretPath)) { exit 2 }`,
-    '$request = Get-Content -LiteralPath $requestPath -Raw | ConvertFrom-Json',
-    'Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue',
-    '$pin = [string]$request.pin',
-    '$parsed = Get-Content -LiteralPath $secretPath -Raw | ConvertFrom-Json',
-    `if ($parsed.schemaVersion -eq ${ADMIN_SECRET_SCHEMA_VERSION} -and $parsed.algorithm -eq '${ADMIN_SECRET_ALGORITHM}') {`,
-    '  try { $salt = [Convert]::FromBase64String([string]$parsed.salt) } catch { exit 3 }',
-    '  $iterations = [int]$parsed.iterations',
-    '  $expected = [string]$parsed.hash',
-    '  if ($iterations -lt 100000 -or !($expected -match "^[0-9a-f]{64}$")) { exit 3 }',
-    '  $derive = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($pin, $salt, $iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)',
-    '  $actual = ($derive.GetBytes(32) | ForEach-Object { $_.ToString("x2") }) -join ""',
-    '  $derive.Dispose()',
-    '  if ($actual -ne $expected) { exit 4 }',
-    '  exit 0',
-    '}',
-    '$expected = [string]$parsed.adminPasswordHash',
-    'if (!($expected -match "^[0-9a-f]{64}$")) { exit 3 }',
-    '$sha = [System.Security.Cryptography.SHA256]::Create()',
-    '$bytes = [Text.Encoding]::UTF8.GetBytes($pin)',
-    '$actual = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""',
-    'if ($actual -ne $expected) { exit 4 }',
-    '$salt = New-Object byte[] 16',
-    '$rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()',
-    '$rng.GetBytes($salt)',
-    '$rng.Dispose()',
-    ` $derive = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($pin, $salt, ${ADMIN_SECRET_ITERATIONS}, [System.Security.Cryptography.HashAlgorithmName]::SHA256)`,
-    ' $hash = ($derive.GetBytes(32) | ForEach-Object { $_.ToString("x2") }) -join ""',
-    ' $derive.Dispose()',
-    ` $secret = [ordered]@{ schemaVersion=${ADMIN_SECRET_SCHEMA_VERSION}; algorithm='${ADMIN_SECRET_ALGORITHM}'; iterations=${ADMIN_SECRET_ITERATIONS}; salt=[Convert]::ToBase64String($salt); hash=$hash } | ConvertTo-Json -Compress`,
-    ' [System.IO.File]::WriteAllText($secretPath, $secret, [System.Text.UTF8Encoding]::new($false))',
-    ' icacls.exe $secretPath /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" /C | Out-Null',
-    'exit 0',
-  ].join('\n')
-  const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
-  const command = [
-    "$ErrorActionPreference = 'Stop'",
-    `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand','${encodedScript}') -Verb RunAs -WindowStyle Hidden -Wait -PassThru`,
-    'exit $p.ExitCode',
-  ].join('; ')
-  try {
-    execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true })
-    return true
-  } catch {
-    return false
-  } finally {
-    try { unlinkSync(requestPath) } catch {}
-  }
-}
-
 export function readAdminPasswordHash(): string {
   ensureDir()
   const persistedSecret = readPersistedAdminPasswordSecret()
   if (isLegacyAdminPasswordSecret(persistedSecret)) return persistedSecret.adminPasswordHash
   if (persistedSecret) return LOCKED_ADMIN_PASSWORD_HASH
+  if (process.platform === 'win32') return LOCKED_ADMIN_PASSWORD_HASH
   if (existsSync(ADMIN_SECRET_PATH)) return LOCKED_ADMIN_PASSWORD_HASH
   const legacyHash = readLegacyAdminPasswordHash()
   if (legacyHash) {
@@ -333,9 +276,7 @@ export function verifyAdminPassword(pin: string): boolean {
     }
     return result.ok
   }
-  if (process.platform === 'win32' && existsSync(ADMIN_SECRET_PATH)) {
-    return verifyProtectedAdminPassword(pin)
-  }
+  if (process.platform === 'win32') return false
   const legacyHash = readLegacyAdminPasswordHash()
   if (!legacyHash) {
     const ok = pin === '0000'
@@ -366,32 +307,7 @@ function writeLegacyAdminPasswordHash(hash: string): void {
 function writeAdminPasswordSecret(secret: AdminPasswordSecret): void {
   ensureDir()
   const serialized = JSON.stringify(secret, null, 2)
-  try {
-    atomicWrite(ADMIN_SECRET_PATH, serialized)
-  } catch (err) {
-    if (process.platform !== 'win32') throw err
-    writeProtectedAdminPasswordSecret(serialized)
-  }
-}
-
-function writeProtectedAdminPasswordSecret(serialized: string): void {
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    `$secretPath = '${ADMIN_SECRET_PATH.replace(/'/g, "''")}'`,
-    `$json = '${serialized.replace(/'/g, "''")}'`,
-    '$secretDir = Split-Path -Parent $secretPath',
-    'New-Item -ItemType Directory -Force -Path $secretDir | Out-Null',
-    'Set-Content -LiteralPath $secretPath -Value $json -Encoding UTF8',
-    'icacls.exe $secretDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /C | Out-Null',
-    'icacls.exe $secretPath /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" /C | Out-Null',
-  ].join('\n')
-  const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
-  const command = [
-    "$ErrorActionPreference = 'Stop'",
-    `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','${encodedScript}') -Verb RunAs -Wait -PassThru`,
-    'exit $p.ExitCode',
-  ].join('; ')
-  execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true })
+  atomicWrite(ADMIN_SECRET_PATH, serialized)
 }
 
 function toPersistedSettings(settings: Settings): Omit<Settings, 'adminPasswordHash'> {

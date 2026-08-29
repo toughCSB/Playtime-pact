@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, screen, Tray, nativeImage } from 'electron'
 import { join } from 'path'
-import { exec } from 'child_process'
+import { exec, spawn } from 'child_process'
 import { performance } from 'node:perf_hooks'
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
@@ -352,10 +352,15 @@ function getResourcesDir(): string {
 function spawnSessionWatchdog(): void {
   if (process.platform !== 'win32' || !app.isPackaged) return
   if (process.argv.includes('--no-watchdog')) return
+  if (process.argv.includes('--from-watchdog')) return
   const launcherPath = join(getResourcesDir(), 'start-watch-loop.vbs')
-  exec(`wscript.exe //B //Nologo "${launcherPath}"`, { windowsHide: true }, (err) => {
-    if (err) console.error('session watchdog spawn failed', err)
+  const watchdog = spawn('wscript.exe', ['//B', '//Nologo', launcherPath], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
   })
+  watchdog.on('error', (err) => console.error('session watchdog spawn failed', err))
+  watchdog.unref()
 }
 
 function dateTimePart(type: 'year' | 'month' | 'day' | 'hour' | 'minute' | 'weekday', date = new Date()): string {
