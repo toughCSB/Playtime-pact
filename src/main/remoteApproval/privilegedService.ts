@@ -3,8 +3,10 @@ import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, u
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { join, resolve, win32 } from 'node:path'
 import koffi from 'koffi'
-import { verifyAdminPassword, writeAdminPasswordPin } from '../fileStore'
-import type { ProtectedAccountingHighWater, ProtectedAccountingScope, RemoteApprovalAuthoritySnapshot, RemoteApprovalPermissionTuple } from '../../shared/types'
+import { verifyAdminPassword, writeAdminPasswordPin, readVerifiedDailyUsageForMigration } from '../fileStore'
+import type { DailyUsage, ProtectedAccountingHighWater, ProtectedAccountingScope, RemoteApprovalAuthoritySnapshot, RemoteApprovalPermissionTuple } from '../../shared/types'
+import { DEFAULT_PUBLIC_SETTINGS } from '../../shared/types'
+import { ProtectedUsageStore, publicUsageView, type ProtectedUsageView } from './protectedUsage'
 import type { BrokerSignedProofOperations, RemoteApprovalOperation } from './apiClient'
 import type { TimerStartHandoff } from './startCoordinator'
 import { loadRemoteApprovalRuntimeConfigMetadata, type RemoteApprovalRuntimeConfig } from './runtimeBroker'
@@ -41,7 +43,9 @@ const validProtectedLocalPolicy = (value: unknown): value is ProtectedLocalPolic
     && [policy.weekdaySessionCount, policy.weekendSessionCount].every((entry) => Number.isSafeInteger(entry) && entry! > 0 && entry! <= 48)
     && policy.weekdayLimit! * policy.weekdaySessionCount! <= 1440
     && policy.weekendLimit! * policy.weekendSessionCount! <= 1440
-    && [policy.allowedStartHour, policy.allowedEndHour].every((entry) => Number.isSafeInteger(entry) && entry! >= 0 && entry! <= 23)
+    && Number.isSafeInteger(policy.allowedStartHour) && policy.allowedStartHour! >= 0 && policy.allowedStartHour! <= 23
+    && Number.isSafeInteger(policy.allowedEndHour) && policy.allowedEndHour! >= 0 && policy.allowedEndHour! <= 24
+    && policy.allowedStartHour !== policy.allowedEndHour
     && typeof policy.requireApprovalBeforeStart === 'boolean'
 }
 const nonce = () => randomBytes(24).toString('base64url')
@@ -211,7 +215,7 @@ function writeProtectedLocalPolicy(dir: string, policy: ProtectedLocalPolicy, ho
 }
 type JournalEntry = { previous: string; scopeKey: string; receipt: string; base: string; operation: string; amountMs: number; expiresAt?: number; terminal?: boolean; started?: boolean; attemptId?: string; permission?: RemoteApprovalPermissionTuple; authority?: RemoteApprovalAuthoritySnapshot; state: AccountingState; hash: string }
 function scopeKeyFromEntry(entry: JournalEntry): string {
-  return /^[A-Za-z0-9._:|+-]{1,768}$/.test(entry.scopeKey) ? entry.scopeKey : ''
+  return /^[A-Za-z0-9._:|+\/-]{1,768}$/.test(entry.scopeKey) ? entry.scopeKey : ''
 }
 function readJournal(dir: string): JournalEntry[] {
   if (!existsSync(statePath(dir))) return []
@@ -258,6 +262,7 @@ const ConvertStringSecurityDescriptorToSecurityDescriptorW = advapi32 && advapi3
 const LocalFree = kernel32 && kernel32.func('void * __stdcall LocalFree(void * Memory)')
 const MoveFileExW = kernel32 && kernel32.func('bool __stdcall MoveFileExW(str16 ExistingName, str16 NewName, uint32_t Flags)')
 const GetLastError = kernel32 && kernel32.func('uint32_t __stdcall GetLastError()')
+const WaitNamedPipeW = kernel32 && kernel32.func('bool __stdcall WaitNamedPipeW(str16 Name, uint32_t Timeout)')
 const GetNamedPipeClientProcessId = kernel32 && kernel32.func('bool __stdcall GetNamedPipeClientProcessId(void * Pipe, uint32_t * ClientProcessId)')
 const GetNamedPipeServerProcessId = kernel32 && kernel32.func('bool __stdcall GetNamedPipeServerProcessId(void * Pipe, uint32_t * ServerProcessId)')
 const OpenSCManagerW = advapi32 && advapi32.func('void * __stdcall OpenSCManagerW(str16 MachineName, str16 DatabaseName, uint32_t DesiredAccess)')
@@ -463,6 +468,23 @@ export class PrivilegedApprovalService {
     } : { scopes: {} }
   }
   static loadLocalPolicy(dir?: string): ProtectedLocalPolicy { return readProtectedLocalPolicy(dir) }
+  static initializeLocalProtection(dir: string, migrate = readVerifiedDailyUsageForMigration): void {
+    // This is an explicit elevated installer operation, never a service-start fallback.
+    let policy: ProtectedLocalPolicy
+    if (readPolicySelector(dir) || existsSync(localPolicyPath(dir))) policy = readProtectedLocalPolicy(dir)
+    else {
+      const { weekdayLimit, weekendLimit, weekdaySessionCount, weekendSessionCount, allowedStartHour, allowedEndHour, requireApprovalBeforeStart } = DEFAULT_PUBLIC_SETTINGS
+      policy = { version: 1, ianaTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, weekdayLimit, weekendLimit,
+        weekdaySessionCount, weekendSessionCount, allowedStartHour, allowedEndHour, requireApprovalBeforeStart }
+      if (!validProtectedLocalPolicy(policy)) throw new Error('Protected bootstrap policy invalid')
+      writeProtectedLocalPolicy(dir, policy, () => undefined)
+    }
+    new ProtectedUsageStore(dir, () => currentScopeDay({ ianaTimeZone: policy.ianaTimeZone } as ProtectedAccountingScope)).initialize(migrate)
+  }
+  private usageStore(): ProtectedUsageStore {
+    if (!this.stateDir || !this.localPolicy) throw new Error('Protected local policy uninitialized')
+    return new ProtectedUsageStore(this.stateDir, () => currentScopeDay({ ianaTimeZone: this.localPolicy!.ianaTimeZone } as ProtectedAccountingScope))
+  }
   async invoke(request: PrivilegedRequest, peer: string): Promise<unknown> {
     for (const [value, expires] of this.seen) if (expires < this.now()) this.seen.delete(value)
     if (this.seen.size >= 4096) throw new Error('Privileged service replay capacity denied')
@@ -482,6 +504,20 @@ export class PrivilegedApprovalService {
     if (request.operation === 'read-local-policy') {
       if (request.capability !== 'operational' || !this.localPolicy) throw new Error('Protected local policy uninitialized')
       return { ...this.localPolicy }
+    }
+    if (request.operation === 'read-daily-usage') {
+      if (request.capability !== 'accounting' || Object.keys(request.payload).length !== 0) throw new Error('Privileged service capability denied')
+      return publicUsageView(this.usageStore().read())
+    }
+    if (request.operation === 'write-daily-usage') {
+      if (request.capability !== 'accounting') throw new Error('Privileged service capability denied')
+      const receipt = request.payload.creditReceipt
+      const entry = receipt === undefined ? undefined : this.journal.find((candidate) => candidate.receipt === receipt
+        && (candidate.operation === 'commit' || candidate.operation === 'parent-credit'))
+      if (receipt !== undefined && !entry) throw new Error('Protected usage credit not found')
+      const scope = entry && scopeFromKey(entry.scopeKey, entry.state.scopes[entry.scopeKey]!)
+      return publicUsageView(this.usageStore().write(request.payload.usage as DailyUsage, Number(request.payload.expectedRevision),
+        entry && scope ? { receipt: entry.receipt, amountMs: entry.amountMs, date: scope.ianaDay, countsTowardDailySessions: entry.operation === 'commit' } : undefined, request.payload.running === true))
     }
     if (request.operation === 'health-check') {
       if (request.capability !== 'accounting' || Object.keys(request.payload).length !== 0) throw new Error('Privileged service capability denied')
@@ -508,6 +544,19 @@ export class PrivilegedApprovalService {
       }
       this.localPolicy = candidate
       return { ...candidate }
+    }
+    if (request.operation === 'grant-local-time') {
+      if (request.capability !== 'membership' || !this.localPolicy) throw new Error('Privileged service capability denied')
+      const minutes = Number(request.payload.minutes)
+      if (!Number.isSafeInteger(minutes) || minutes <= 0 || minutes > 240) throw new Error('Parent time adjustment invalid')
+      const scope: ProtectedAccountingScope = {
+        householdId: 'parent', pcId: 'policy', gameId: 'shared', allowanceVersion: 1,
+        ianaTimeZone: this.localPolicy.ianaTimeZone, ianaDay: '', totalMs: 0,
+      }
+      scope.ianaDay = currentScopeDay(scope)
+      const current = this.accounting.scopes[scopeKey(scope)]
+      scope.totalMs = current?.totalMs ?? 0
+      return this.accountingOp('parent-credit', { scope, receipt: request.payload.receipt, amountMs: minutes * 60_000, expectedVersion: current?.version ?? 0 }, true)
     }
     if (request.capability === 'operational') return this.operational(request.operation, request.payload)
     if (request.capability === 'membership') return this.membership(request.operation, request.payload)
@@ -613,7 +662,7 @@ export class PrivilegedApprovalService {
     const hash = createHash('sha256').update(JSON.stringify({ previous: '', scopeKey: checkpointKey, receipt: `${base}:reconcile`, base, operation: 'checkpoint', amountMs: 0, state: checkpointState })).digest('base64url')
     const checkpoint: JournalEntry = { previous: '', scopeKey: checkpointKey, receipt: `${base}:reconcile`, base, operation: 'checkpoint', amountMs: 0, state: checkpointState, hash }
     const recoverableReceipts = new Set(unresolvedCommits.map((entry) => entry.receipt))
-    const activeEntries = this.journal.filter((entry) => checkpointState.scopes[entry.scopeKey]?.reservedMs > 0
+    const activeEntries = this.journal.filter((entry) => (entry.operation === 'parent-credit' && checkpointState.scopes[entry.scopeKey]) || checkpointState.scopes[entry.scopeKey]?.reservedMs > 0
       || (entry.operation === 'commit' && recoverableReceipts.has(entry.receipt)))
     const compacted = [checkpoint]
     for (const original of activeEntries) {
@@ -627,7 +676,8 @@ export class PrivilegedApprovalService {
     this.accounting = checkpointState
     this.journal.splice(0, this.journal.length, ...compacted)
   }
-  private accountingOp(operation: string, payload: Record<string, unknown>): AccountingState {
+  private accountingOp(operation: string, payload: Record<string, unknown>, parentAuthorized = false): AccountingState {
+    if (operation === 'parent-credit' && !parentAuthorized) throw new Error('Privileged service capability denied')
     if (!validAccounting(this.accounting)) throw new Error('Protected accounting integrity unavailable')
     const scope = payload.scope
     if (!validScope(scope)) throw new Error('Protected accounting scope invalid')
@@ -644,12 +694,12 @@ export class PrivilegedApprovalService {
       return { scopes: { ...this.accounting.scopes, [key]: this.accounting.scopes[key] ?? current } }
     }
     const receipt = String(payload.receipt ?? '')
-    const match = operation === 'commit' ? [receipt, receipt, 'commit', undefined] : /^(.+):(reserve|start|debit|reconcile|attempt|outcome|materialized)(-terminal|-started|-not-started)?$/.exec(receipt)
+    const match = operation === 'commit' ? [receipt, receipt, 'commit', undefined] : /^(.+):(reserve|start|debit|reconcile|attempt|outcome|materialized|parent-credit)(-terminal|-started|-not-started)?$/.exec(receipt)
     if (!match || !/^[A-Za-z0-9._:-]{16,256}$/.test(receipt)) throw new Error('Protected accounting receipt invalid')
     const [, rawBase, receiptOperation, operationSuffix] = match
     const base = rawBase!
     if (receiptOperation !== operation) throw new Error('Protected accounting receipt transition invalid')
-    const amountMs = ['reserve', 'debit', 'attempt', 'outcome', 'commit', 'materialized'].includes(operation) ? Number(payload.amountMs) : 0
+    const amountMs = ['reserve', 'debit', 'attempt', 'outcome', 'commit', 'materialized', 'parent-credit'].includes(operation) ? Number(payload.amountMs) : 0
     const terminal = operation === 'reconcile' ? operationSuffix === '-terminal' && payload.terminal === true : undefined
     const started = operation === 'outcome'
       ? operationSuffix === (payload.started === true ? '-started' : '-not-started') && typeof payload.started === 'boolean' ? payload.started : undefined
@@ -678,7 +728,10 @@ export class PrivilegedApprovalService {
     const outcome = entries.find((entry) => entry.operation === 'outcome')
     if (!Number.isSafeInteger(payload.expectedVersion) || payload.expectedVersion !== current.version) throw new Error('Protected accounting compare-and-swap failed')
     let nextHighWater: ProtectedAccountingHighWater
-    if (operation === 'materialized') {
+    if (operation === 'parent-credit') {
+      if (!Number.isSafeInteger(amountMs) || amountMs <= 0 || current.totalMs + amountMs > 86_400_000) throw new Error('Parent time allowance exceeded')
+      nextHighWater = { ...current, totalMs: current.totalMs + amountMs, committedMs: current.committedMs + amountMs, version: current.version + 1 }
+    } else if (operation === 'materialized') {
       const committed = this.journal.find((entry) => entry.operation === 'commit' && entry.receipt === base && entry.scopeKey === key)
       if (!committed || committed.amountMs !== amountMs || JSON.stringify({ permission: committed.permission, authority: committed.authority }) !== JSON.stringify(context)) throw new Error('Protected accounting materialized conflict')
       nextHighWater = current
@@ -836,18 +889,27 @@ function redactedCode(error: unknown): PrivilegedHealthCode | undefined {
   return REDACTED_CODES.find((candidate) => candidate === code)
 }
 function serve(socket: Socket, service: PrivilegedApprovalService, peer: string): void { let data = Buffer.alloc(0); socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy()); socket.on('data', (part: Buffer) => { data = Buffer.concat([data, part]); if (data.length < 4) return; const size = data.readUInt32BE(0); if (size > MAX_FRAME_BYTES || data.length !== size + 4) return socket.destroy(); try { const request = JSON.parse(data.subarray(4).toString()) as PrivilegedRequest; void service.invoke(request, peer).then((result) => socket.end(frame({ ok: true, nonce: request.nonce, result })), (error) => socket.end(frame({ ok: false, nonce: request.nonce, code: redactedCode(error) }))) } catch { socket.destroy() } }) }
+async function openAvailableWindowsPipe(pipe: string, timeout: number): Promise<unknown> {
+  const deadline = performance.now() + timeout
+  while (true) {
+    const handle = CreateFileW!(pipe, 0xc0000000, 0, null, 3, 0, null)
+    if (!invalidWindowsHandle(handle)) return handle
+    const win32Error = GetLastError?.()
+    const remaining = Math.ceil(deadline - performance.now())
+    if (win32Error !== 231 || remaining <= 0 || !WaitNamedPipeW) {
+      throw privilegedHealthFailure('pipe-open', classifyWindowsPipeOpenError(win32Error), 'Protected named-pipe service unavailable')
+    }
+    // Only wait for ERROR_PIPE_BUSY; access/identity failures remain terminal.
+    await new Promise<void>((resolve) => WaitNamedPipeW.async(pipe, remaining, () => resolve()))
+  }
+}
 function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServiceIdentity: boolean) {
-  return (request: PrivilegedRequest) => new Promise<unknown>((ok, bad) => {
+  return async (request: PrivilegedRequest) => {
     if (!CreateFileW || !WriteFile || !ReadFile || !CancelIoEx || !CloseHandle) {
-      bad(privilegedHealthFailure('client-init', 'NATIVE_API_UNAVAILABLE', 'Native Windows named-pipe client unavailable'))
-      return
+      throw privilegedHealthFailure('client-init', 'NATIVE_API_UNAVAILABLE', 'Native Windows named-pipe client unavailable')
     }
-    const handle = CreateFileW(pipe, 0xc0000000, 0, null, 3, 0, null)
-    if (invalidWindowsHandle(handle)) {
-      const win32Error = GetLastError?.()
-      bad(privilegedHealthFailure('pipe-open', classifyWindowsPipeOpenError(win32Error), 'Protected named-pipe service unavailable'))
-      return
-    }
+    const handle = await openAvailableWindowsPipe(pipe, timeout)
+    return new Promise<unknown>((ok, bad) => {
     let settled = false
     let timer: NodeJS.Timeout
     const close = () => {
@@ -922,7 +984,8 @@ function nativeWindowsPipeTransport(pipe: string, timeout: number, requireServic
         }
       })
     })
-  })
+    })
+  }
 }
 
 export function namedPipeTransport(pipe = PRIVILEGED_PIPE, timeout = REQUEST_TIMEOUT_MS, requireServiceIdentity = pipe === PRIVILEGED_PIPE) {
@@ -1036,8 +1099,27 @@ export class PrivilegedBrokerClient implements BrokerSignedProofOperations {
   async readLocalPolicy(): Promise<ProtectedLocalPolicy> {
     return this.transport({ capability: 'operational', purpose: 'remote-approval', nonce: nonce(), operation: 'read-local-policy', payload: {} }) as Promise<ProtectedLocalPolicy>
   }
+  async readDailyUsage(): Promise<ProtectedUsageView> {
+    return this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation: 'read-daily-usage', payload: {} }) as Promise<ProtectedUsageView>
+  }
+  async writeDailyUsage(usage: DailyUsage, expectedRevision: number, creditReceipt?: string, running = false): Promise<ProtectedUsageView> {
+    return this.transport({ capability: 'accounting', purpose: 'start-accounting', nonce: nonce(), operation: 'write-daily-usage', payload: { usage, expectedRevision, running, ...(creditReceipt ? { creditReceipt } : {}) } }) as Promise<ProtectedUsageView>
+  }
+  async readinessCheck(): Promise<void> {
+    await this.healthCheck()
+    const policy = await this.readLocalPolicy()
+    const day = currentScopeDay({ ianaTimeZone: policy.ianaTimeZone } as ProtectedAccountingScope)
+    const weekend = ['Sat', 'Sun'].includes(new Intl.DateTimeFormat('en-US', { timeZone: policy.ianaTimeZone, weekday: 'short' }).format(new Date()))
+    for (const gameId of ['minecraft', 'roblox']) await this.readAccounting({ householdId: 'policy', pcId: 'policy', gameId,
+      ianaTimeZone: policy.ianaTimeZone, ianaDay: day, allowanceVersion: 1,
+      totalMs: 60000 * (weekend ? policy.weekendLimit * policy.weekendSessionCount : policy.weekdayLimit * policy.weekdaySessionCount) })
+    await this.readDailyUsage()
+  }
   async setLocalPolicy(policy: Omit<ProtectedLocalPolicy, 'version'>): Promise<ProtectedLocalPolicy> {
     return this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), adminSession: this.token, operation: 'set-local-policy', payload: { policy } }) as Promise<ProtectedLocalPolicy>
+  }
+  async grantLocalTime(minutes: number, receipt: string): Promise<void> {
+    await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), adminSession: this.token, operation: 'grant-local-time', payload: { minutes, receipt: `${receipt}:parent-credit` } })
   }
   async bootstrapMembership(): Promise<RemoteApprovalRuntimeConfig['membership']> { return this.transport({ capability: 'operational', purpose: 'remote-approval', nonce: nonce(), operation: 'bootstrap-membership', payload: {} }) as Promise<RemoteApprovalRuntimeConfig['membership']> }
 }

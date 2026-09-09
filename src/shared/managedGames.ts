@@ -6,6 +6,8 @@ export interface ManagedProcessRecord {
   name?: string | null
   executablePath?: string | null
   commandLine?: string | null
+  originalFilename?: string | null
+  productName?: string | null
 }
 
 export interface ManagedLaunchCommand {
@@ -31,9 +33,6 @@ const MANAGED_GAME_IMAGE_HINTS: Record<ManagedGameId, readonly string[]> = {
   minecraft: [
     'minecraft.exe',
     'minecraft.windows.exe',
-    'minecraftlauncher.exe',
-    'lunar client.exe',
-    'lunar client (qt5).exe',
     'badlion client.exe',
     'badlionclient.exe',
     'feather client.exe',
@@ -48,6 +47,7 @@ const MANAGED_GAME_IMAGE_HINTS: Record<ManagedGameId, readonly string[]> = {
   roblox: [
     'robloxplayer.exe',
     'robloxplayerbeta.exe',
+    'robloxapp.exe',
   ],
 }
 
@@ -65,6 +65,14 @@ const MINECRAFT_COMMAND_HINTS = [
   'fabric-loader',
   'forge',
 ] as const
+
+// Installers, Studio and crash reporting belong to Roblox but are not game sessions.
+// Check original filenames too: shared ProductName metadata must not promote them.
+const ROBLOX_NON_GAME_IMAGES = new Set([
+  'robloxplayerinstaller.exe', 'robloxplayerlauncher.exe', 'robloxplayerlauncherbeta.exe',
+  'robloxstudiobeta.exe', 'robloxstudio.exe', 'robloxstudioinstaller.exe',
+  'robloxstudiolauncherbeta.exe', 'robloxcrashhandler.exe',
+])
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
@@ -116,18 +124,24 @@ export function classifyManagedGameProcess(record: ManagedProcessRecord): Manage
   const name = normalizeText(record.name)
   const executablePath = normalizeText(record.executablePath)
   const commandLine = normalizeText(record.commandLine)
-  const searchable = `${name}\n${executablePath}\n${commandLine}`
+  const originalFilename = normalizeText(record.originalFilename)
+  const productName = normalizeText(record.productName)
+  const searchable = `${executablePath}\n${commandLine}`
 
-  if (MANAGED_GAME_IMAGE_HINTS.roblox.includes(name)) return 'roblox'
+  if (name === 'minecraftlauncher.exe' || name === 'lunar client.exe' || name === 'lunar client (qt5).exe') return null
+  if (ROBLOX_NON_GAME_IMAGES.has(name) || ROBLOX_NON_GAME_IMAGES.has(originalFilename)) return null
+  if (MANAGED_GAME_IMAGE_HINTS.roblox.includes(name) || MANAGED_GAME_IMAGE_HINTS.roblox.includes(originalFilename)) return 'roblox'
+  if (productName === 'roblox' || productName === 'roblox player') return 'roblox'
   if (name !== 'java.exe' && name !== 'javaw.exe' && MANAGED_GAME_IMAGE_HINTS.minecraft.includes(name)) {
     return 'minecraft'
   }
 
-  if ((name === 'java.exe' || name === 'javaw.exe') && MINECRAFT_COMMAND_HINTS.some((hint) => searchable.includes(hint))) {
+  const isJava = ['java.exe', 'javaw.exe'].includes(name) || ['java.exe', 'javaw.exe'].includes(originalFilename)
+  if (isJava && MINECRAFT_COMMAND_HINTS.some((hint) => searchable.includes(hint))) {
     return 'minecraft'
   }
 
-  if (name && name !== 'java.exe' && name !== 'javaw.exe' && MINECRAFT_COMMAND_HINTS.some((hint) => searchable.includes(hint))) {
+  if (['minecraft.exe', 'minecraft.windows.exe'].includes(originalFilename) || productName === 'minecraft' || productName === 'minecraft for windows') {
     return 'minecraft'
   }
 

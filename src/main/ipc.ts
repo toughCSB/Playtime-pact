@@ -57,6 +57,8 @@ function getLocalDateString(date = new Date()): string {
 
 
 export function registerIpcHandlers(callbacks: {
+  readPublicSettings?: () => PublicSettings
+  readDailyRemaining?: () => Promise<DailyRemaining>
   approveNextSession?: () => Promise<boolean>
   verifyAdminPin?: (pin: string) => Promise<boolean>
   changeAdminPin?: (newPin: string) => Promise<void>
@@ -67,7 +69,7 @@ export function registerIpcHandlers(callbacks: {
     controller: RemoteApprovalController
   }
 } = {}): void {
-  ipcMain.handle('settings:read', async () => redactSettings(readSettings()))
+  ipcMain.handle('settings:read', async () => callbacks.readPublicSettings?.() ?? redactSettings(readSettings()))
 
   ipcMain.handle('settings:write', async (event, settings: PublicSettings) => {
     requireAdminSession(event)
@@ -117,6 +119,7 @@ export function registerIpcHandlers(callbacks: {
 
   // 오늘 남은 세션 정보 조회
   ipcMain.handle('daily:get-remaining', async (): Promise<DailyRemaining> => {
+    if (callbacks.readDailyRemaining) return callbacks.readDailyRemaining()
     const today = getLocalDateString()
     const storedUsage = readDailyUsage()
     const usage = normalizeDailyUsage({

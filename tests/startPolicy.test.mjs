@@ -8,9 +8,9 @@ import {
 } from '../src/shared/startPolicy'
 
 describe('parent approval start policy', () => {
-  it('defaults to requiring parent approval before a fresh game session starts', () => {
-    expect(DEFAULT_SETTINGS.requireApprovalBeforeStart).toBe(true)
-    expect(shouldRequireApprovalForStart(DEFAULT_SETTINGS, { hasActiveSession: false })).toBe(true)
+  it('defaults new households to automatic play within the parent configured allowance', () => {
+    expect(DEFAULT_SETTINGS.requireApprovalBeforeStart).toBe(false)
+    expect(shouldRequireApprovalForStart(DEFAULT_SETTINGS, { hasActiveSession: false })).toBe(false)
   })
 
   it('does not require approval when the parent chooses automatic start mode', () => {

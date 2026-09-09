@@ -427,6 +427,13 @@ export function readDailyUsage(): DailyUsage | null {
     return null
   }
 }
+export function readVerifiedDailyUsageForMigration(): DailyUsage | null {
+  if (!existsSync(DAILY_USAGE_PATH)) return null
+  if (!isDailyUsageIntegrityAvailable()) throw new Error('Legacy daily usage integrity unavailable')
+  const usage = readDailyUsage()
+  if (!usage) throw new Error('Legacy daily usage invalid')
+  return usage
+}
 function dailyUsagePayload(usage: DailyUsage): string {
   return JSON.stringify({
     date: usage.date,

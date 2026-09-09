@@ -229,6 +229,33 @@ describe('runtime remote approval broker', () => {
     await expect(service.invoke(request)).rejects.toThrow('replay')
     await expect(service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'B'.repeat(16), operation: 'update', payload: {} })).rejects.toThrow('capability')
   })
+  it('distinguishes a responding service from initialized desktop protection and preserves bootstrap state', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-ready-'))
+    try {
+      let service = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} }, directory)
+      let client = new PrivilegedBrokerClient((request) => service.invoke(request, 'ready-peer'))
+      await expect(client.healthCheck()).resolves.toBe('ok')
+      await expect(client.readinessCheck()).rejects.toThrow('uninitialized')
+      PrivilegedApprovalService.initializeLocalProtection(directory, () => null)
+      const policyBefore = PrivilegedApprovalService.loadLocalPolicy(directory)
+      const usageBefore = readFileSync(join(directory, 'desktop-usage.json'), 'utf8')
+      PrivilegedApprovalService.initializeLocalProtection(directory, () => { throw new Error('must not migrate twice') })
+      expect(PrivilegedApprovalService.loadLocalPolicy(directory)).toEqual(policyBefore)
+      expect(readFileSync(join(directory, 'desktop-usage.json'), 'utf8')).toBe(usageBefore)
+      service = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} }, directory)
+      client = new PrivilegedBrokerClient((request) => service.invoke(request, 'ready-peer'))
+      await expect(client.readinessCheck()).resolves.toBeUndefined()
+      const snapshot = await client.readDailyUsage()
+      await expect(client.writeDailyUsage({ ...snapshot.usage, currentSessionRemainingMs: 60_000 }, snapshot.revision)).rejects.toThrow('unused credit')
+      await expect(service.invoke({ capability: 'operational', purpose: 'remote-approval', nonce: 'wrong-usage-capability-0001', operation: 'read-daily-usage', payload: {} }, 'ready-peer')).rejects.toThrow('capability')
+      await expect(service.invoke({ capability: 'accounting', purpose: 'membership-sync', nonce: 'wrong-usage-purpose-00001', operation: 'read-daily-usage', payload: {} }, 'ready-peer')).rejects.toThrow('capability')
+      writeFileSync(join(directory, 'desktop-usage.json'), 'corrupt')
+      await expect(client.readinessCheck()).rejects.toThrow()
+    } finally {
+      expect(removeTestPolicySelector(directory)).toBe(true)
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
   it('health-checks without reading or mutating protected broker state', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-health-check-'))
     const policy = {
@@ -285,6 +312,9 @@ describe('runtime remote approval broker', () => {
     try {
       const request = { capability: 'accounting', purpose: 'start-accounting', nonce: 'G'.repeat(16), operation: 'reserve', payload: { scope: accountingScope, receipt: 'receipt-runtime-0001:reserve', expectedVersion: 0, amountMs: 1 } }
       await expect(namedPipeTransport(pipe)(request)).resolves.toMatchObject({ scopes: expect.any(Object) })
+      for (let index = 0; index < 20; index++) {
+        await expect(namedPipeTransport(pipe)({ ...request, nonce: `sequential-read-${String(index).padStart(4, '0')}` })).resolves.toMatchObject({ scopes: expect.any(Object) })
+      }
       const denied = { ...request, nonce: 'health-operation-denied', capability: 'operational', operation: 'health-check', payload: {} }
       const deniedError = await namedPipeTransport(pipe)(denied).catch((error) => error)
       expect(formatPrivilegedHealthDiagnostic(deniedError)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=service-operation code=OPERATION_DENIED\n')
@@ -336,6 +366,9 @@ describe('runtime remote approval broker', () => {
     try {
       const request = { capability: 'accounting', purpose: 'start-accounting', nonce: 'H'.repeat(16), operation: 'read', payload: { scope: accountingScope } }
       await expect(namedPipeTransport(pipe)(request)).resolves.toMatchObject({ scopes: expect.any(Object) })
+      for (let index = 0; index < 20; index++) {
+        await expect(namedPipeTransport(pipe)({ ...request, nonce: `native-reconnect-${String(index).padStart(4, '0')}` })).resolves.toMatchObject({ scopes: expect.any(Object) })
+      }
     } finally {
       await new Promise((resolve) => server.close(resolve))
       rmSync(directory, { recursive: true, force: true })
@@ -363,7 +396,12 @@ describe('runtime remote approval broker', () => {
     try {
       const client = new PrivilegedBrokerClient(namedPipeTransport(pipe, 1_000, false))
       const error = await client.healthCheck().catch((cause) => cause)
-      expect(formatPrivilegedHealthDiagnostic(error)).toBe('PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=response-read code=RESPONSE_READ_FAILED\n')
+      // The peer closes immediately: Windows can observe that close during either
+      // request write or response read, but never as pipe-open or SCM failure.
+      expect([
+        'PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=request-write code=REQUEST_WRITE_FAILED\n',
+        'PLAYTIME_PACT_PRIVILEGED_HEALTH_V1 stage=response-read code=RESPONSE_READ_FAILED\n',
+      ]).toContain(formatPrivilegedHealthDiagnostic(error))
     } finally {
       await new Promise((resolve) => server.close(resolve))
     }
@@ -445,6 +483,30 @@ describe('runtime remote approval broker', () => {
       rmSync(directory, { recursive: true, force: true })
     }
   })
+  it('requires a parent session for durable extra time, deduplicates retries, and supports midnight policy endpoints', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-parent-time-'))
+    try {
+      const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} }, directory, () => 1_000, () => true)
+      const client = new PrivilegedBrokerClient((request) => service.invoke(request, 'parent-peer'))
+      await expect(client.grantLocalTime(5, 'parent-time:approval-0001')).rejects.toThrow('capability')
+      await client.verifyPin('1234')
+      await client.setLocalPolicy({ ianaTimeZone: 'Asia/Seoul', weekdayLimit: 60, weekendLimit: 60, weekdaySessionCount: 1, weekendSessionCount: 1, allowedStartHour: 0, allowedEndHour: 24, requireApprovalBeforeStart: false })
+      await client.grantLocalTime(5, 'parent-time:approval-0001')
+      await client.grantLocalTime(5, 'parent-time:approval-0001')
+      await expect(client.grantLocalTime(6, 'parent-time:approval-0001')).rejects.toThrow('conflict')
+      await expect(service.invoke({ capability: 'accounting', purpose: 'start-accounting', nonce: 'credit-forgery-0001', operation: 'parent-credit', payload: {} }, 'child-peer')).rejects.toThrow('capability')
+      const state = PrivilegedApprovalService.loadAccounting(directory)
+      expect(Object.values(state.scopes)).toEqual([{ totalMs: 300_000, committedMs: 300_000, reservedMs: 0, version: 1 }])
+      const restarted = new PrivilegedApprovalService(async () => ({}), async () => ({}), state, directory)
+      expect(PrivilegedApprovalService.loadLocalPolicy(directory).allowedEndHour).toBe(24)
+      await expect(new PrivilegedBrokerClient((request) => restarted.invoke(request, 'parent-peer')).grantLocalTime(5, 'parent-time:approval-0002')).rejects.toThrow('capability')
+      expect(PrivilegedApprovalService.loadAccounting(directory)).toEqual(state)
+    } finally {
+      expect(removeTestPolicySelector(directory)).toBe(true)
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('throttles PIN verification globally and per caller at the UI lockout boundary', async () => {
     let now = 1_000
     let verifications = 0

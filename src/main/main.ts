@@ -1,7 +1,8 @@
 import { app, BrowserWindow, ipcMain, screen, Tray, nativeImage } from 'electron'
 import { join } from 'path'
-import { exec, spawn } from 'child_process'
+import { exec, execFileSync, spawn } from 'child_process'
 import { performance } from 'node:perf_hooks'
+import { randomUUID } from 'node:crypto'
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
 import { registerIpcHandlers } from './ipc'
@@ -15,7 +16,7 @@ import { loadRemoteApprovalRuntimeConfig, RemoteApprovalConfigError, remoteMutab
 import { requireAdminSession } from './adminAuth'
 import {
   readSettings, writeTimerState, clearTimerState, readTimerState,
-  readDailyUsage, writeDailyUsage, appendSession, readSessions,
+  appendSession, readSessions,
 } from './fileStore'
 import { isHourAllowed } from '../shared/policy'
 import { shouldRequireApprovalForStart } from '../shared/startPolicy'
@@ -24,7 +25,7 @@ import { listSecondaryManagedGames, selectPrimaryManagedGame, type ManagedGameSn
 import { normalizeTimerAdjustmentMinutes } from '../shared/timerAdjust'
 import { decideStartupWindowAction, shouldStartHiddenFromLaunch } from '../shared/startupVisibility'
 import { isDailyUsageExhausted, normalizeDailyUsage, shouldPersistNormalizedDailyUsage } from '../shared/dailyUsage'
-import { getManagedGameSnapshot, getManagedGameSnapshotCapture, terminateSupportedGames } from './managedGameRuntime'
+import { getManagedGameSnapshot, getManagedGameSnapshotCapture, terminateSupportedGames, isManagedGameTerminationInFlight } from './managedGameRuntime'
 import type { DailyUsage, GamePresenceSpan, ManagedGameId, PrimarySelectionEvent, ProtectedAccountingScope, RemoteApprovalPermissionTuple, RemoteApprovalRequest, Session, TimerState } from '../shared/types'
 import {
   ADMIN_WINDOW_PROFILE,
@@ -38,7 +39,9 @@ import {
 const privilegedServiceMode = process.argv.includes('--privileged-broker-service')
 const privilegedHealthCheckMode = process.argv.includes('--privileged-broker-health-check')
 const privilegedConfigCheckMode = process.argv.includes('--privileged-broker-config-check')
-const hasSingleInstanceLock = privilegedServiceMode || privilegedHealthCheckMode || privilegedConfigCheckMode || app.requestSingleInstanceLock()
+const initializeLocalProtectionMode = process.argv.includes('--initialize-local-protection')
+const protectionReadinessMode = process.argv.includes('--protection-readiness-check')
+const hasSingleInstanceLock = privilegedServiceMode || privilegedHealthCheckMode || privilegedConfigCheckMode || initializeLocalProtectionMode || protectionReadinessMode || app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) app.quit()
 
 let mainWindow: BrowserWindow | null = null
@@ -59,6 +62,10 @@ type BlockedFailureContext = {
 
 let mainWindowPresentation: MainWindowPresentation = 'hidden-inactive'
 let blockedFailureContext: BlockedFailureContext | null = null
+let gameTerminationPending = false
+let gameTerminationAttemptFinished = false
+let timerAdjustmentInFlight = false
+let deferredClosedGameId: ManagedGameId | null = null
 app.on('second-instance', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return
   showMainWindowForCurrentPresentation(mainWindow)
@@ -91,7 +98,6 @@ let managedGameDetectInterval: ReturnType<typeof setInterval> | null = null
 let activeManagedGameIds: ManagedGameId[] = []
 let primaryManagedGameId: ManagedGameId | null = null
 let lastManagedGameBlockedReason = ''
-let lastManagedGamePresenceCheck = 0
 let managedGameLastDetectedAt: Partial<Record<ManagedGameId, number>> = {}
 const observedProcessStartedAt = new Map<number, number>()
 
@@ -147,6 +153,7 @@ const remoteApprovalController = new RemoteApprovalController(
   remoteServerClock,
   remoteMutableStatePath(provisionedRemoteConfig, 'intent.json')
     ?? (process.env.PLAYTIME_PACT_REMOTE_CONFIG ? `${process.env.PLAYTIME_PACT_REMOTE_CONFIG}.intent.json` : null),
+  false,
 )
 let blockedApprovalGameId: ManagedGameId | null = null
 let remoteRequestInFlight: Promise<unknown> | null = null
@@ -154,10 +161,10 @@ let accountingIntegrityFault = true
 let protectedLocalPolicy: ProtectedLocalPolicy | null = null
 const remoteStartCoordinator = new RemoteStartCoordinator(
   remoteApprovalClient,
-  ({ permission }) => {
-    if (accountingIntegrityFault) return false
-    const snapshot = getManagedGameSnapshot()
-    return mainWindow !== null
+  async ({ permission }) => {
+    if (accountingIntegrityFault || gameTerminationPending) return false
+    const snapshot = await getManagedGameSnapshot()
+    return !accountingIntegrityFault && !gameTerminationPending && mainWindow !== null
       && timerStart === null
       && !remoteApprovalController.isRecoveryInProgress()
       && isAllowedHour()
@@ -166,14 +173,18 @@ const remoteStartCoordinator = new RemoteStartCoordinator(
         && String(process.pid) === permission.processId
         && process.processStartedAt === permission.processStartedAt)
   },
-  (approvedMinutes, receipt) => {
+  async (approvedMinutes, receipt) => {
+    if (gameTerminationPending) return false
     const persisted = readTimerState()
     if ((timerStart !== null && timerStartReceipt === receipt) || persisted?.startReceipt === receipt) return true
     if (!mainWindow || timerStart !== null || remoteApprovalController.isRecoveryInProgress()) return false
-    const snapshot = getManagedGameSnapshot()
+    const snapshot = await getManagedGameSnapshot()
+    if (!mainWindow || timerStart !== null || gameTerminationPending || remoteApprovalController.isRecoveryInProgress()) return false
     if (shouldBlockTimerStartWithoutSupportedGame(app.isPackaged, snapshot.activeGameIds.length > 0)) return false
     const startedAt = Date.now()
     const primaryGameId = selectPrimaryManagedGame(snapshot.activeGameIds, managedGameLastDetectedAt, primaryManagedGameId) ?? snapshot.activeGameIds[0]
+    await persistProtectedUsage({ ...getDailyUsage(), currentSessionRemainingMs: Math.round(approvedMinutes * 60_000) }, receipt)
+    if (!isAllowedHour() || accountingIntegrityFault || gameTerminationPending) return false
     writeTimerState({
       startTime: startedAt,
       limitMs: Math.round(approvedMinutes * 60_000),
@@ -185,7 +196,7 @@ const remoteStartCoordinator = new RemoteStartCoordinator(
       startReceipt: receipt,
     })
     blockedApprovalGameId = null
-    startTimer(mainWindow, approvedMinutes, { primaryGameId, activeGameIds: snapshot.activeGameIds, startReceipt: receipt, startTime: startedAt })
+    await startTimer(mainWindow, approvedMinutes, { primaryGameId, activeGameIds: snapshot.activeGameIds, startReceipt: receipt, startTime: startedAt })
     return true
   },
   privilegedBroker,
@@ -251,14 +262,16 @@ const WATCHDOG_DISABLED_PATH = join(COMMON_APP_DATA_DIR, 'PlaytimePact', 'watchd
 const FALLBACK_TRAY_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAB6ElEQVR4nI2SQUgUYRTHX0TdI9jd2R0NPARRLCYliLDe1Et2iDCo9KQiwSJ0CDYFPdimwmIYKOwcEiMS6RLoJaKCiKFZamfDgohaRGgCq6MwY/7j/+3OsO1uWw+Gx/f+v//73nzfJ9IgHNG/OaKDuRFXE6aEEjkJXy2b/e/I/5oPmBJyTQnhk0S/b4vubkmMkyw6onf8s4Ej+rwlYbw6HEP+8ihujaaQH7iG59op5CXCSeYbmY2XEsLGzduYnMyAMTKSUtkwVlWdOrl65iuvJYziXQM7Oz8QjcaRTt+BH5ZVUJk6OfJ/NPgiMftF90Ukk1PwvD309PSjpeUsKoN16uTIV+6u2aJhK7sSwK7rorm5DclzA6gOcuTp8xu0c6zU9WksLz8KwIUzvdh9+BjTxzuDGnVy5d9o9xu05iSC9aUVFIvbAfxz/SnsC0PoO3oCTU2nkc3eVzq5XOlGWv0Gh96L9uvj1BxM823NyOPjaXUeY2MTSidHnr7gHL6K/uDJsTbMzSzVNKgM6uTIV19jfFM0vLk0BM/zkMkYymDbH1TmmnXqm6UDjNd7C4MF0bCROA/r3iqwv4/h4ZTKXLNeKJkHG73G7s8SfWdJBM8Oalg7mVCZa9ap/9Vc1ajLEf2GI/psOXfV434Du+O1a17Rx5AAAAAASUVORK5CYII='
 
 function getDailyUsage(): DailyUsage {
-  if (accountingIntegrityFault) {
-    return { date: getLocalDateString(), sessionsCompleted: 1000, currentSessionRemainingMs: 0 }
+  if (!protectedLocalPolicy || accountingIntegrityFault) {
+    return { date: protectedLocalPolicy ? getLocalDateString() : '', sessionsCompleted: 1000, currentSessionRemainingMs: 0 }
   }
   const today = getLocalDateString()
-  const storedUsage = volatileDailyUsage?.date === today ? volatileDailyUsage : readDailyUsage()
-  if (volatileDailyUsage?.date !== today) {
-    volatileDailyUsage = null
+  if (!volatileDailyUsage || volatileDailyUsage.date !== today) {
+    accountingIntegrityFault = true
+    void requireProtectedPolicyReadiness().catch(handleUsagePersistenceFailure)
+    return { date: today, sessionsCompleted: 1000, currentSessionRemainingMs: 0 }
   }
+  const storedUsage = volatileDailyUsage
   const usage = normalizeDailyUsage({
     storedUsage,
     sessions: readSessions(),
@@ -266,12 +279,7 @@ function getDailyUsage(): DailyUsage {
   })
   volatileDailyUsage = usage
   if (shouldPersistNormalizedDailyUsage(storedUsage, usage)) {
-    try {
-      writeDailyUsage(usage)
-    } catch (err) {
-      accountingIntegrityFault = true
-      console.error('daily-usage normalization write failed; denying starts', err)
-    }
+    safeWriteDailyUsage(usage)
   }
   return usage
 }
@@ -292,14 +300,37 @@ function safeClearTimerState(): void {
   }
 }
 
-function safeWriteDailyUsage(usage: DailyUsage): void {
-  volatileDailyUsage = usage
-  try {
-    writeDailyUsage(usage)
-  } catch (err) {
-    accountingIntegrityFault = true
-    console.error('daily-usage write failed; denying starts', err)
+let usageRevision: number | null = null
+let usageWriteQueue: Promise<void> = Promise.resolve()
+let usageWritesPending = 0
+let usageWriteGeneration = 0
+function handleUsagePersistenceFailure(): void {
+  const wasReady = !accountingIntegrityFault
+  accountingIntegrityFault = true
+  if (wasReady) console.error('protected usage persistence failed; denying starts')
+  if (timerStart !== null && !gameTerminationPending) {
+    void terminateSupportedGames().then((result) => {
+      if (result.success) pauseTimerInternals()
+      else mainWindow?.webContents.send('timer:termination-failed', { message: '사용 시간 저장에 실패했습니다. 게임을 종료할 수 없어 보호를 유지합니다.', remainingGameIds: result.remainingGameIds })
+    }).catch(() => console.error('protected usage failure termination unavailable'))
   }
+}
+function persistProtectedUsage(usage: DailyUsage, creditReceipt?: string, running = timerStart !== null): Promise<void> {
+  const snapshot = { ...usage }
+  const generation = ++usageWriteGeneration
+  usageWritesPending++
+  volatileDailyUsage = snapshot
+  const write = usageWriteQueue.then(async () => {
+    if (usageRevision === null || accountingIntegrityFault) throw new Error('Protected usage not ready')
+    const result = await privilegedBroker.writeDailyUsage(snapshot, usageRevision, creditReceipt, running)
+    usageRevision = result.revision
+    if (generation === usageWriteGeneration) volatileDailyUsage = result.usage
+  }).finally(() => { usageWritesPending-- })
+  usageWriteQueue = write.catch(handleUsagePersistenceFailure)
+  return write
+}
+function safeWriteDailyUsage(usage: DailyUsage, running = timerStart !== null): void {
+  void persistProtectedUsage(usage, undefined, running).catch(() => undefined)
 }
 
 function safeAppendSession(session: Omit<Session, 'id'>): void {
@@ -491,8 +522,9 @@ function applyManagedGameSnapshot(
 }
 
 async function approveNextSession(): Promise<boolean> {
-  const snapshot = getManagedGameSnapshot()
   const gameId = blockedApprovalGameId
+  const snapshot = await getManagedGameSnapshot()
+  if (blockedApprovalGameId !== gameId) return false
   // PIN fallback is an outage/local-only authority and can be armed only after the
   // blocked original process has exited. It never launches a replacement process.
   if (!gameId || !remoteApprovalController.allowsLocalFallback() || snapshot.activeGameIds.includes(gameId)) return false
@@ -521,9 +553,6 @@ async function approveNextSession(): Promise<boolean> {
   }
 }
 
-function isAnyManagedGameRunning(snapshot = getManagedGameSnapshot()): boolean {
-  return snapshot.activeGameIds.length > 0
-}
 function getTrustedManagedProcess(snapshot: ManagedGameSnapshot, gameId: ManagedGameId | undefined): { gameId: ManagedGameId; processId: string; processStartedAt: number } | null {
   const process = snapshot.classifiedProcesses.find((candidate) => candidate.gameId === gameId)
   if (!process) return null
@@ -580,6 +609,10 @@ async function requireProtectedPolicyReadiness(): Promise<void> {
     privilegedBroker.readAccounting(localPolicyScope(probe('roblox'))),
     privilegedBroker.readAccounting(localPolicyScope(probe('minecraft'))),
   ])
+  await usageWriteQueue
+  const snapshot = await privilegedBroker.readDailyUsage()
+  usageRevision = snapshot.revision
+  volatileDailyUsage = snapshot.usage
   accountingIntegrityFault = false
 }
 
@@ -630,7 +663,7 @@ function persistPausedTimer(): void {
     date: today,
     sessionsCompleted: (usage?.date === today ? usage.sessionsCompleted : 0),
     currentSessionRemainingMs: remainingMs,
-  })
+  }, false)
   if (remainingMs > 0) {
     safeWriteTimerState({
       startTime: timerStart,
@@ -659,6 +692,7 @@ function pauseActiveTimer(): void {
 }
 
 function pauseTimerBecauseManagedGamesClosed(closedGameId: ManagedGameId): void {
+  if (timerAdjustmentInFlight) { deferredClosedGameId = closedGameId; return }
   if (!shouldPauseTimerWhenSupportedGameMissing(timerStart !== null, false)) return
   pauseActiveTimer()
   mainWindow?.webContents.send('game:closed', buildManagedGameEventPayload(closedGameId))
@@ -676,21 +710,24 @@ function readPausedTimerResumeState(today: string, fallbackRemainingMs: number) 
       activeGameIds: undefined,
       presenceSpans: undefined,
       primarySelectionEvents: undefined,
+      startReceipt: undefined,
     }
   }
 
   return {
-    remainingMs: state.pausedRemainingMs !== undefined ? state.pausedRemainingMs : fallbackRemainingMs,
+    remainingMs: Math.min(state.pausedRemainingMs !== undefined ? state.pausedRemainingMs : fallbackRemainingMs, fallbackRemainingMs),
     sessionStartTime: state.sessionStartTime,
     limitAtSession: state.limitAtSession,
     primaryGameId: state.primaryGameId,
     activeGameIds: state.activeGameIds,
     presenceSpans: state.presenceSpans,
     primarySelectionEvents: state.primarySelectionEvents,
+    startReceipt: state.startReceipt,
   }
 }
 
 function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boolean {
+  if (gameTerminationPending || timerAdjustmentInFlight || usageWritesPending > 0) return false
   if (accountingIntegrityFault) {
     enforceManagedGameBlock('daily-exhausted', snapshot.activeGameIds[0])
     return false
@@ -705,7 +742,7 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
 
   if (usageToday && usageToday.currentSessionRemainingMs > 0) {
     const resumeState = readPausedTimerResumeState(today, usageToday.currentSessionRemainingMs)
-    startTimer(mainWindow, perSessionMinutes, {
+    void startTimer(mainWindow, perSessionMinutes, {
       resumeRemainingMs: resumeState.remainingMs,
       sessionStartTime: resumeState.sessionStartTime,
       limitAtSession: resumeState.limitAtSession,
@@ -713,7 +750,8 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
       activeGameIds: snapshot.activeGameIds,
       presenceSpans: resumeState.presenceSpans,
       primarySelectionEvents: resumeState.primarySelectionEvents,
-    })
+      startReceipt: resumeState.startReceipt,
+    }).catch(handleUsagePersistenceFailure)
     return true
   }
 
@@ -888,7 +926,8 @@ function clearBlockedFailureViaGameClosed(win: BrowserWindow, gameId?: ManagedGa
     activeGameIds: [],
   })
   blockedFailureContext = null
-  if (reason === 'approval-required') {
+  lastManagedGameBlockedReason = ''
+  if (reason === 'approval-required' || reason === 'daily-exhausted') {
     restoreMainFullPageWindow(win)
   } else {
     mainWindowPresentation = 'hidden-inactive'
@@ -904,12 +943,12 @@ function showSupportedGameBlocked(
   if (!mainWindow) return
   const settings = readSettings()
   const message = reason === 'outside-hours'
-    ? `지금은 지원 게임 허용 시간이 아닙니다. (${settings.allowedStartHour}시 ~ ${settings.allowedEndHour}시)`
+    ? `지금은 게임 허용 시간이 아닙니다. (${settings.allowedStartHour}시 ~ ${settings.allowedEndHour}시)`
     : reason === 'approval-required'
-      ? '부모님 PIN 승인 후 지원 게임을 시작할 수 있습니다.'
-      : '오늘 지원 게임 시간을 모두 사용했습니다.'
+      ? '부모님 PIN 승인 후 게임을 시작할 수 있습니다.'
+      : '금일 약속된 게임 타임이 종료되었습니다. 당신의 인생이 플러스가 될 게임을 시작할 시간입니다. Do Your Best !!'
   if (reason === 'approval-required' && gameId) blockedApprovalGameId = gameId
-  const key = `${reason}:${getLocalDateString()}:${new Date().getHours()}:${new Date().getMinutes()}`
+  const key = `${reason}:${Math.floor(Date.now() / 60_000)}`
   if (lastManagedGameBlockedReason === key) return
   lastManagedGameBlockedReason = key
   if (!options.preserveCompact) restoreMainFullPageWindow(mainWindow)
@@ -992,14 +1031,18 @@ function restoreCornerAfterPopup(win: BrowserWindow, epoch: number): void {
   moveToCorner(win)
 }
 
-function completeActiveTimer(win: BrowserWindow): void {
-  if (timerLimitMs === null) return
+function completeActiveTimer(win: BrowserWindow, authorizedAdjustment = false): void {
+  if (isManagedGameTerminationInFlight()) return
+  if (timerLimitMs === null || gameTerminationPending || (timerAdjustmentInFlight && !authorizedAdjustment)) return
+  gameTerminationPending = true
+  gameTerminationAttemptFinished = false
   const today = getLocalDateString()
   const usage = getDailyUsage()
   const closedAt = new Date().toISOString()
   closeOpenPresenceSpans(activeManagedGameIds, 'expired', closedAt)
 
   const primaryGameId = getSessionHistoryGameId()
+  const countsTowardDailySessions = !timerStartReceipt?.startsWith('parent-time:')
   const historyGameIds = Array.from(new Set([
     ...quotaPresenceSpans.map((span) => span.gameId),
     ...activeManagedGameIds,
@@ -1007,10 +1050,10 @@ function completeActiveTimer(win: BrowserWindow): void {
 
   safeWriteDailyUsage({
     date: today,
-    sessionsCompleted: (usage?.date === today ? usage.sessionsCompleted : 0) + 1,
+    sessionsCompleted: (usage?.date === today ? usage.sessionsCompleted : 0) + (countsTowardDailySessions ? 1 : 0),
     currentSessionRemainingMs: 0,
   })
-  safeAppendSession({
+  const completedSession: Omit<Session, 'id'> = {
     gameId: primaryGameId,
     date: today,
     startTime: timerSessionStartTime || getLocalTimeString(),
@@ -1021,22 +1064,32 @@ function completeActiveTimer(win: BrowserWindow): void {
     activeGameIds: historyGameIds,
     presenceSpans: [...quotaPresenceSpans],
     primarySelectionEvents: [...quotaPrimarySelectionEvents],
-    terminated: true,
-  })
+    terminated: false,
+    countsTowardDailySessions,
+  }
   stopTimerInternals()
+  const { w, h, x, y } = getCenterInfo()
+  win.setBounds({ x, y, width: w, height: h }, false)
+  win.setAlwaysOnTop(true, 'floating')
+  win.setSkipTaskbar(true)
   timerUiMode = 'shutdown'
   mainWindowPresentation = 'shutdown-overlay'
   blockedFailureContext = null
   win.webContents.send('timer:mode', { mode: 'shutdown' })
   setTimeout(async () => {
     const termination = await terminateSupportedGames()
+    gameTerminationAttemptFinished = true
+    safeAppendSession({ ...completedSession, terminated: termination.success })
     if (!termination.success) {
+      if (win.isDestroyed()) return
       win.webContents.send('timer:termination-failed', {
         message: '게임을 종료하지 못했습니다. 보호 창을 계속 표시합니다.',
         remainingGameIds: termination.remainingGameIds,
       })
       return
     }
+    gameTerminationPending = false
+    if (win.isDestroyed()) return
     mainWindowPresentation = 'hidden-inactive'
     hideToTray()
     win.webContents.send('timer:expired')
@@ -1055,7 +1108,7 @@ function adjustActiveTimer(deltaMinutes: number): number {
   timerLimitAtSession = Math.max(0, timerLimitAtSession + normalizedDeltaMinutes)
 
   if (nextRemainingMs <= 0) {
-    completeActiveTimer(mainWindow)
+    completeActiveTimer(mainWindow, true)
     return 0
   }
 
@@ -1102,6 +1155,65 @@ function adjustActiveTimer(deltaMinutes: number): number {
   return Math.ceil(nextRemainingMs / 1000)
 }
 
+async function adjustManagedTime(minutes: number): Promise<number> {
+  if (isManagedGameTerminationInFlight()) throw new Error('Timer adjustment unavailable')
+  const delta = normalizeTimerAdjustmentMinutes(minutes)
+  if (timerAdjustmentInFlight || gameTerminationPending || accountingIntegrityFault || remoteApprovalController.isRecoveryInProgress()) throw new Error('Timer adjustment unavailable')
+  const usage = getDailyUsage()
+  const paused = readTimerState()
+  const hasPaused = paused?.date === getLocalDateString() && usage.currentSessionRemainingMs > 0
+  if (timerStart === null && !hasPaused && (!isSessionExhausted(getLocalDateString()) || delta < 0)) throw new Error('Start a game before adjusting time')
+  timerAdjustmentInFlight = true
+  const receipt = `parent-time:${randomUUID()}`
+  try {
+    if (delta > 0) {
+      await privilegedBroker.grantLocalTime(delta, receipt)
+      await persistProtectedUsage({ ...getDailyUsage(), currentSessionRemainingMs: getDailyUsage().currentSessionRemainingMs + delta * 60_000 }, `${receipt}:parent-credit`)
+    }
+    if (timerStart !== null) {
+      const remaining = adjustActiveTimer(delta)
+      await usageWriteQueue
+      if (accountingIntegrityFault) throw new Error('Protected usage persistence failed')
+      return remaining
+    }
+    const currentUsage = getDailyUsage()
+    const state = readTimerState()
+    const existing = state?.date === getLocalDateString() && currentUsage.currentSessionRemainingMs > 0 ? state : null
+    const remainingMs = Math.max(0, currentUsage.currentSessionRemainingMs + Math.min(0, delta) * 60_000)
+    if (remainingMs > 86_400_000) throw new Error('Timer allowance exceeded')
+    const finishesBaseSession = remainingMs === 0 && existing && !existing.startReceipt?.startsWith('parent-time:')
+    const nextUsage = { ...currentUsage, sessionsCompleted: currentUsage.sessionsCompleted + (finishesBaseSession ? 1 : 0), currentSessionRemainingMs: remainingMs }
+    // Persist before acknowledging success; a failed write must not look like an approval.
+    await persistProtectedUsage(nextUsage)
+    if (remainingMs > 0) {
+      writeTimerState({
+        ...(existing ?? {}), startTime: Date.now(), date: getLocalDateString(),
+        limitMs: remainingMs, pausedRemainingMs: remainingMs,
+        limitAtSession: Math.max(0, (existing?.limitAtSession ?? 0) + delta),
+        startReceipt: existing?.startReceipt ?? receipt,
+      })
+    } else {
+      if (existing) safeAppendSession({
+        gameId: existing.primaryGameId ?? 'roblox', date: getLocalDateString(),
+        startTime: existing.sessionStartTime ?? getLocalTimeString(), endTime: getLocalTimeString(),
+        duration: existing.limitAtSession ?? Math.ceil(existing.limitMs / 60_000),
+        limitAtSession: existing.limitAtSession ?? Math.ceil(existing.limitMs / 60_000),
+        primaryGameId: existing.primaryGameId, activeGameIds: existing.activeGameIds,
+        presenceSpans: existing.presenceSpans, primarySelectionEvents: existing.primarySelectionEvents,
+        terminated: true, countsTowardDailySessions: Boolean(finishesBaseSession),
+      })
+      clearTimerState()
+    }
+    return Math.ceil(remainingMs / 1000)
+  } finally {
+    timerAdjustmentInFlight = false
+    const closedGameId = deferredClosedGameId
+    deferredClosedGameId = null
+    if (closedGameId && activeManagedGameIds.length === 0) pauseTimerBecauseManagedGamesClosed(closedGameId)
+    await usageWriteQueue
+  }
+}
+
 type StartTimerOptions = {
   resumeRemainingMs?: number
   sessionStartTime?: string
@@ -1114,15 +1226,18 @@ type StartTimerOptions = {
   startTime?: number
 }
 
-function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTimerOptions = {}): void {
+async function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTimerOptions = {}): Promise<void> {
+  const nextActiveGameIds = [...(options.activeGameIds ?? (await getManagedGameSnapshot()).activeGameIds)]
   if (accountingIntegrityFault) {
     return
   }
+  await persistProtectedUsage({ ...getDailyUsage(), currentSessionRemainingMs: Math.min(getDailyUsage().currentSessionRemainingMs, options.resumeRemainingMs ?? Math.round(limitMinutes * 60000)) }, undefined, true)
+  if (accountingIntegrityFault || gameTerminationPending || isManagedGameTerminationInFlight() || !isAllowedHour() || getDailyUsage().currentSessionRemainingMs <= 0) return
+  options = { ...options, resumeRemainingMs: getDailyUsage().currentSessionRemainingMs }
   stopTimerInternals(options.startReceipt === undefined)
 
   const cursor = screen.getCursorScreenPoint()
   timerDisplay = screen.getDisplayNearestPoint(cursor)
-  lastManagedGamePresenceCheck = 0
 
   const limitMs = Math.round(limitMinutes * 60 * 1000)
   timerLimitMs = limitMs
@@ -1139,7 +1254,6 @@ function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTime
   warnedMinutes.clear()
   inCenterMode = false
 
-  const nextActiveGameIds = [...(options.activeGameIds ?? getManagedGameSnapshot().activeGameIds)]
   const detectedAt = Date.now()
   for (const gameId of nextActiveGameIds) {
     if (!managedGameLastDetectedAt[gameId]) managedGameLastDetectedAt[gameId] = detectedAt
@@ -1185,32 +1299,8 @@ function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTime
   timerInterval = setInterval(() => {
     if (timerStart === null || timerLimitMs === null) return
 
-    const now = Date.now()
-    if (process.platform === 'win32' && now - lastManagedGamePresenceCheck >= 2000) {
-      lastManagedGamePresenceCheck = now
-      const capture = getManagedGameSnapshotCapture()
-      if (capture.succeeded) {
-        const snapshot = capture.snapshot
-        const presenceUpdate = applyManagedGameSnapshot(snapshot)
-        const affectedGameId = presenceUpdate.newlyActiveGameIds.at(-1)
-          ?? presenceUpdate.closedGameIds.at(0)
-          ?? primaryManagedGameId
-          ?? snapshot.activeGameIds[0]
-          ?? getSessionHistoryGameId()
-
-        if (!isAnyManagedGameRunning(snapshot)) {
-          pauseTimerBecauseManagedGamesClosed(affectedGameId)
-          return
-        }
-
-        if (presenceUpdate.newlyActiveGameIds.length > 0 || presenceUpdate.closedGameIds.length > 0 || presenceUpdate.primaryChanged) {
-          const channel = presenceUpdate.closedGameIds.length > 0 && presenceUpdate.newlyActiveGameIds.length === 0
-            ? 'game:closed'
-            : 'game:detected'
-          mainWindow?.webContents.send(channel, buildManagedGameEventPayload(affectedGameId))
-        }
-      }
-    }
+    // Presence is sampled independently by startManagedGameDetection. Never
+    // await OS process enumeration on the clock/warning/expiry path.
 
     if (!isAllowedHour()) {
       completeActiveTimer(win)
@@ -1263,9 +1353,17 @@ function startTimer(win: BrowserWindow, limitMinutes: number, options: StartTime
   }, 1000)
 }
 
-function tryResumeTimer(): boolean {
+async function tryResumeTimer(): Promise<boolean> {
+  // Missing authority is a blocked startup, not a reason to read dates or
+  // discard persisted timer state from an unhandled startup callback.
+  if (!protectedLocalPolicy || accountingIntegrityFault) return false
   const win = mainWindow
   if (!win) return false
+
+  const capture = await getManagedGameSnapshotCapture()
+  if (timerStart !== null) return true
+  if (win.isDestroyed() || gameTerminationPending || isManagedGameTerminationInFlight() || accountingIntegrityFault || !protectedLocalPolicy || timerAdjustmentInFlight) return false
+  if (!capture.succeeded) return false
 
   const settings = readSettings()
   const state = readTimerState()
@@ -1288,9 +1386,8 @@ function tryResumeTimer(): boolean {
     : Math.max(0, state.limitMs - (Date.now() - state.startTime))
 
   const usage = getDailyUsage()
-  const dailyRemaining = (usage && usage.date === today && usage.currentSessionRemainingMs > 0)
-    ? usage.currentSessionRemainingMs
-    : stateRemaining
+  // A protected zero is authoritative; a stale/editable timer file cannot revive it.
+  const dailyRemaining = usage.date === today ? usage.currentSessionRemainingMs : 0
 
   const remaining = Math.min(stateRemaining, dailyRemaining)
   if (remaining <= 0) {
@@ -1298,8 +1395,6 @@ function tryResumeTimer(): boolean {
     return false
   }
 
-  const capture = getManagedGameSnapshotCapture()
-  if (!capture.succeeded) return false
   const snapshot = capture.snapshot
   if (shouldBlockTimerStartWithoutSupportedGame(app.isPackaged, snapshot.activeGameIds.length > 0)) {
     activeManagedGameIds = []
@@ -1326,7 +1421,7 @@ function tryResumeTimer(): boolean {
   }
 
   const limitMinutes = Math.max(1, state.limitMs / 60000)
-  startTimer(win, limitMinutes, {
+  void startTimer(win, limitMinutes, {
     resumeRemainingMs: remaining,
     sessionStartTime: state.sessionStartTime,
     limitAtSession: state.limitAtSession,
@@ -1335,7 +1430,7 @@ function tryResumeTimer(): boolean {
     presenceSpans: state.presenceSpans,
     primarySelectionEvents: state.primarySelectionEvents,
     startReceipt: state.startReceipt,
-  })
+  }).catch(handleUsagePersistenceFailure)
   win.webContents.send('timer:resumed', { remainingSeconds: Math.ceil(remaining / 1000) })
   return true
 }
@@ -1454,12 +1549,29 @@ function createTray(): void {
 
 function startManagedGameDetection(): void {
   if (managedGameDetectInterval) return
-
-  managedGameDetectInterval = setInterval(() => {
-    const capture = getManagedGameSnapshotCapture()
+  let capturing = false
+  managedGameDetectInterval = setInterval(async () => {
+    if (capturing) return
+    capturing = true
+    let capture
+    try { capture = await getManagedGameSnapshotCapture() } finally { capturing = false }
+    if (!managedGameDetectInterval || !mainWindow || mainWindow.isDestroyed()) return
     if (!capture.succeeded) return
+    if (isManagedGameTerminationInFlight()) return
     const snapshot = capture.snapshot
     const hasRunningManagedGames = snapshot.activeGameIds.length > 0
+
+    if (gameTerminationPending) {
+      if (!gameTerminationAttemptFinished) return
+      if (hasRunningManagedGames) return
+      gameTerminationPending = false
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindowPresentation = 'hidden-inactive'
+        hideToTray()
+        mainWindow.webContents.send('timer:expired')
+      }
+      return
+    }
 
     if (!managedGameBaselineCaptured) {
       managedGameBaselineCaptured = true
@@ -1524,7 +1636,7 @@ function startManagedGameDetection(): void {
     if (started || presenceUpdate.newlyActiveGameIds.length > 0 || presenceUpdate.primaryChanged) {
       mainWindow?.webContents.send('game:detected', buildManagedGameEventPayload(detectedGameId))
     }
-  }, 3000)
+  }, 2000)
 }
 
 type QaOverlayMode = 'corner' | 'center-popup' | 'center-countdown' | 'shutdown'
@@ -1587,13 +1699,19 @@ function createWindow(): void {
   })
 
   ipcMain.handle('timer:start', async (_e, { limitMinutes }: { limitMinutes: number }) => {
+    if (usageWritesPending > 0) return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'invalid-limit' }
+    if (!protectedLocalPolicy || accountingIntegrityFault) return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'invalid-limit' }
+    if (gameTerminationPending || timerAdjustmentInFlight) return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'managed-game-not-running' }
     if (!mainWindow) return { resumed: false, remainingSeconds: 0, exhausted: false }
     if (timerStart !== null && timerLimitMs !== null) {
       const remaining = Math.max(0, timerLimitMs - (Date.now() - timerStart))
       return { resumed: true, remainingSeconds: Math.ceil(remaining / 1000), exhausted: false }
     }
 
-    const snapshot = getManagedGameSnapshot()
+    const snapshot = await getManagedGameSnapshot()
+    if (!mainWindow || timerStart !== null || gameTerminationPending || timerAdjustmentInFlight || accountingIntegrityFault) {
+      return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'managed-game-not-running' }
+    }
     if (shouldBlockTimerStartWithoutSupportedGame(app.isPackaged, snapshot.activeGameIds.length > 0)) {
       return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'managed-game-not-running' }
     }
@@ -1617,14 +1735,15 @@ function createWindow(): void {
 
     if (usageToday && usageToday.currentSessionRemainingMs > 0) {
       const resumeState = readPausedTimerResumeState(today, usageToday.currentSessionRemainingMs)
-      startTimer(mainWindow, limitMins, {
+      await startTimer(mainWindow, limitMins, {
         resumeRemainingMs: resumeState.remainingMs,
         sessionStartTime: resumeState.sessionStartTime,
         limitAtSession: resumeState.limitAtSession,
         primaryGameId: resumeState.primaryGameId,
         activeGameIds: snapshot.activeGameIds,
         presenceSpans: resumeState.presenceSpans,
-        primarySelectionEvents: resumeState.primarySelectionEvents,
+      primarySelectionEvents: resumeState.primarySelectionEvents,
+      startReceipt: resumeState.startReceipt,
       })
       return { resumed: true, remainingSeconds: Math.ceil(resumeState.remainingMs / 1000), exhausted: false }
     }
@@ -1672,7 +1791,7 @@ function createWindow(): void {
   ipcMain.handle('timer:get-status', async () => {
     const managedState = getManagedGameState()
     if (timerStart === null || timerLimitMs === null) {
-      return { running: false, remainingSeconds: 0, mode: timerUiMode, ...managedState }
+      return { running: false, remainingSeconds: Math.ceil(getDailyUsage().currentSessionRemainingMs / 1000), mode: timerUiMode, ...managedState }
     }
     const elapsed = Date.now() - timerStart
     const remaining = Math.max(0, timerLimitMs - elapsed)
@@ -1681,11 +1800,13 @@ function createWindow(): void {
 
   ipcMain.handle('timer:adjust-time', async (event, { minutes }: { minutes: number }) => {
     requireAdminSession(event)
-    return { remainingSeconds: adjustActiveTimer(Number(minutes)) }
+    return { remainingSeconds: await adjustManagedTime(Number(minutes)) }
   })
 
   ipcMain.handle('timer:admin-stop', async (event) => {
     requireAdminSession(event)
+    if (isManagedGameTerminationInFlight()) throw new Error('Timer action in progress')
+    if (timerAdjustmentInFlight || gameTerminationPending) throw new Error('Timer action in progress')
     const termination = await terminateSupportedGames()
     if (!termination.success) {
       mainWindow?.webContents.send('timer:termination-failed', {
@@ -1763,7 +1884,21 @@ function createWindow(): void {
   })
 }
 
-if (privilegedConfigCheckMode) {
+// A fresh install must migrate the legacy HMAC record under the SYSTEM-only
+// service identity. An elevated installer administrator token is deliberately
+// not sufficient to read that key, so the service-mode bootstrap below owns
+// this explicit initialization.
+if (initializeLocalProtectionMode && !privilegedServiceMode) {
+  app.whenReady().then(() => {
+    const elevated = execFileSync('powershell.exe', ['-NoProfile', '-Command', '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)'], { encoding: 'utf8', windowsHide: true }).trim()
+    if (elevated !== 'True') throw new Error('Administrator initialization required')
+    PrivilegedApprovalService.initializeLocalProtection('C:\\ProgramData\\PlaytimePact\\Broker\\Accounting')
+    app.exit(0)
+  }).catch(() => { process.stderr.write('Local protection initialization failed\n'); app.exit(1) })
+} else if (protectionReadinessMode) {
+  app.whenReady().then(async () => { await privilegedBroker.readinessCheck(); app.exit(0) })
+    .catch((error: unknown) => { process.stderr.write(formatPrivilegedHealthDiagnostic(error)); app.exit(1) })
+} else if (privilegedConfigCheckMode) {
   app.whenReady().then(async () => {
     try {
       const membership = await bootstrapPrivilegedMembership()
@@ -1778,6 +1913,9 @@ if (privilegedConfigCheckMode) {
 } else if (privilegedServiceMode) {
   app.whenReady().then(async () => {
     const stateDir = 'C:\\ProgramData\\PlaytimePact\\Broker\\Accounting'
+    if (initializeLocalProtectionMode) {
+      PrivilegedApprovalService.initializeLocalProtection(stateDir)
+    }
     const config = provisionedRemoteConfig
     const configLoadError = provisionedRemoteConfigState.error
     const remote = config ? new WindowsCngRemoteApprovalBroker(config, undefined, undefined, () => Date.now(), remoteServerClock) : null
@@ -1812,6 +1950,7 @@ if (privilegedConfigCheckMode) {
 app.whenReady().then(async () => {
   try {
     protectedLocalPolicy = await privilegedBroker.readLocalPolicy()
+    remoteApprovalController.setEnabled(protectedLocalPolicy.requireApprovalBeforeStart)
     await requireProtectedPolicyReadiness()
   } catch (error) {
     protectedLocalPolicy = null
@@ -1829,6 +1968,24 @@ app.whenReady().then(async () => {
     },
   )
   registerIpcHandlers({
+    readPublicSettings: () => {
+      const settings = readSettings()
+      if (protectedLocalPolicy) {
+        const { version: _version, ianaTimeZone: _timeZone, ...policy } = protectedLocalPolicy
+        Object.assign(settings, policy)
+      }
+      const { adminPasswordHash: _secret, ...publicSettings } = settings
+      return publicSettings
+    },
+    readDailyRemaining: async () => {
+      if (!protectedLocalPolicy || accountingIntegrityFault) throw new Error('Protected usage unavailable')
+      const usage = getDailyUsage()
+      const { sessionsPerDay, perSessionMinutes } = getTodaySessionCount()
+      const exhausted = accountingIntegrityFault || isDailyUsageExhausted(usage, sessionsPerDay)
+      return { remainingSeconds: exhausted ? 0 : usage.currentSessionRemainingMs > 0 ? Math.ceil(usage.currentSessionRemainingMs / 1000) : perSessionMinutes * 60,
+        exhausted, totalSeconds: perSessionMinutes * 60, sessionsCompleted: usage.sessionsCompleted, sessionsPerDay,
+        currentSessionActive: !exhausted && usage.currentSessionRemainingMs > 0 }
+    },
     approveNextSession,
     verifyAdminPin: (pin) => privilegedBroker.verifyPin(pin),
     changeAdminPin: (newPin) => privilegedBroker.changePin(newPin),
@@ -1845,6 +2002,7 @@ app.whenReady().then(async () => {
         allowedEndHour: settings.allowedEndHour,
         requireApprovalBeforeStart: settings.requireApprovalBeforeStart,
       })
+      remoteApprovalController.setEnabled(protectedLocalPolicy.requireApprovalBeforeStart)
       accountingIntegrityFault = true
       await requireProtectedPolicyReadiness()
     },
@@ -1853,7 +2011,7 @@ app.whenReady().then(async () => {
       controller: remoteApprovalController,
       createRequest: async ({ gameId }) => {
         if (gameId !== 'minecraft' && gameId !== 'roblox') throw new Error('unsupported managed game')
-        const snapshot = getManagedGameSnapshot()
+        const snapshot = await getManagedGameSnapshot()
         const process = getTrustedManagedProcess(snapshot, gameId)
         if (!process) throw new Error('managed game not running')
         return remoteApprovalController.createRequest({
@@ -1876,8 +2034,8 @@ app.whenReady().then(async () => {
       accountingIntegrityFault = true
       console.error('committed timer handoff recovery failed', error)
     }
-    setTimeout(() => {
-      const resumed = timerStart !== null || tryResumeTimer()
+    setTimeout(async () => {
+      const resumed = timerStart !== null || await tryResumeTimer()
       const action = decideStartupWindowAction({ startHidden, resumedTimer: resumed })
       if (action === 'show-main-window' && mainWindow) {
         restoreMainFullPageWindow(mainWindow)

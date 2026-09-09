@@ -34,8 +34,19 @@ export class RemoteApprovalController {
      * remains the fallback for unprovisioned developer runs.
      */
     private readonly intentPath: string | null = process.env.PLAYTIME_PACT_REMOTE_CONFIG ? `${process.env.PLAYTIME_PACT_REMOTE_CONFIG}.intent.json` : null,
+    private enabled = true,
   ) {
     void this.replayDurableIntent()
+  }
+
+  setEnabled(enabled: boolean): void {
+    if (this.enabled === enabled) return
+    this.stopPolling()
+    this.enabled = enabled
+    this.invalidateAuthority()
+    this.localFallback = !enabled || !this.client
+    this.setState({ lifecycle: enabled && this.client ? 'connecting' : 'offline', ...(this.membership ?? {}) })
+    if (enabled) this.startPolling()
   }
 
   subscribe(listener: Listener): () => void { this.listeners.add(listener); listener(this.getState()); return () => this.listeners.delete(listener) }
@@ -55,9 +66,10 @@ export class RemoteApprovalController {
       || this.membership?.serviceEpoch !== membership?.serviceEpoch
     if (changed) this.invalidateAuthority()
     this.membership = membership
-    this.setState(membership ? { lifecycle: this.client ? 'connecting' : 'offline', ...membership } : { lifecycle: 'offline' })
+    this.localFallback = !this.enabled || !this.client
+    this.setState(membership ? { lifecycle: this.enabled && this.client ? 'connecting' : 'offline', ...membership } : { lifecycle: 'offline' })
   }
-  startPolling(): void { if (this.timer || !this.client || !this.membership) return; this.maintainAuthority(); this.timer = setInterval(() => this.maintainAuthority(), this.pollMs) }
+  startPolling(): void { if (!this.enabled || this.timer || !this.client || !this.membership) return; this.maintainAuthority(); this.timer = setInterval(() => this.maintainAuthority(), this.pollMs) }
   stopPolling(): void { if (this.timer) clearInterval(this.timer); this.timer = null }
 
   private setState(next: Omit<RemoteApprovalState, 'updatedAt'>): void {
@@ -93,7 +105,7 @@ export class RemoteApprovalController {
       && allowance.totalSeconds! >= allowance.committedSeconds! + allowance.reservedSeconds!
       ? allowance as RemoteApprovalAllowance : undefined
   }
-  private requireMembership(): Membership { if (!this.membership) throw new RemoteApprovalClientError('offline'); return this.membership }
+  private requireMembership(): Membership { if (!this.enabled || !this.membership) throw new RemoteApprovalClientError('offline'); return this.membership }
   allowsLocalFallback(): boolean {
     return !this.hasIntentFile()
       && this.state.lifecycle !== 'connecting'
@@ -132,7 +144,7 @@ export class RemoteApprovalController {
   }
   private replayDurableIntent(): Promise<void> {
     if (this.intentReplay) return this.intentReplay
-    if (!this.client || !this.readIntent()) return Promise.resolve()
+    if (!this.enabled || !this.client || !this.readIntent()) return Promise.resolve()
     const replay = this.performDurableIntentReplay().finally(() => {
       if (this.intentReplay === replay) this.intentReplay = null
     })
@@ -204,6 +216,7 @@ export class RemoteApprovalController {
   }
 
   async sync(): Promise<RemoteApprovalState> {
+    if (!this.enabled) return this.getState()
     if (this.hasIntentFile()) {
       this.localFallback = false
       if (this.membership) this.setState({ lifecycle: 'error', ...this.membership })

@@ -11,6 +11,33 @@ import { ServerClock } from '../src/main/remoteApproval/serverClock'
 import { RemoteStartCoordinator } from '../src/main/remoteApproval/startCoordinator'
 
 const membership = { householdId: 'household-1', pcId: 'pc-1', membershipEpoch: 3, serviceEpoch: 7 }
+
+describe('optional mobile approval', () => {
+  it('does not send network requests while disabled but retains local authority and rejects stale responses after toggling off', async () => {
+    let reads = 0
+    let resolveStatus
+    const client = { readStatus: () => { reads++; return new Promise((resolve) => { resolveStatus = resolve }) } }
+    const controller = new RemoteApprovalController(client, 10_000, () => 1_000, undefined, new ServerClock(() => 1_000), null, false)
+    controller.configureMembership(membership)
+    const initialAuthority = controller.getAuthoritySnapshot()
+    expect(initialAuthority.membershipEpoch).toBe(3)
+    expect(controller.allowsLocalFallback()).toBe(true)
+    controller.startPolling()
+    await controller.sync()
+    await expect(controller.createRequest({ gameId: 'roblox' })).rejects.toMatchObject({ code: 'offline' })
+    expect(reads).toBe(0)
+    controller.setEnabled(true)
+    controller.stopPolling()
+    await Promise.resolve()
+    const pending = controller.sync()
+    controller.setEnabled(false)
+    resolveStatus({ serverNowMs: 1_000, membershipEpoch: 3, serviceEpoch: 7 })
+    await pending
+    expect(controller.getState().lifecycle).toBe('offline')
+    expect(controller.getAuthoritySnapshot().authorityGeneration).toBeGreaterThan(initialAuthority.authorityGeneration)
+    expect(controller.allowsLocalFallback()).toBe(true)
+  })
+})
 const authority = (authorityGeneration = 1, membershipEpoch = 3, serviceEpoch = 7) => Object.freeze({ membershipEpoch, serviceEpoch, authorityGeneration })
 const permission = {
   householdId: 'household-1',

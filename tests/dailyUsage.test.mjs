@@ -7,6 +7,15 @@ import {
 } from '../src/shared/dailyUsage'
 
 describe('daily usage recovery', () => {
+  it('preserves the base-session quota when a parent approved extra session finishes', () => {
+    const usage = normalizeDailyUsage({ storedUsage: null, sessions: [
+      { date: '2026-09-08', terminated: true },
+      { date: '2026-09-08', terminated: true, countsTowardDailySessions: false },
+    ], dateKey: '2026-09-08' })
+    expect(usage.sessionsCompleted).toBe(1)
+    expect(isDailyUsageExhausted({ ...usage, currentSessionRemainingMs: 300_000 }, 1)).toBe(false)
+    expect(isDailyUsageExhausted(usage, 1)).toBe(true)
+  })
   it('recovers completed sessions from durable session history when daily usage is missing', () => {
     const usage = normalizeDailyUsage({
       storedUsage: null,

@@ -2,7 +2,7 @@ import type { DailyUsage, Session } from './types'
 
 const MAX_DAILY_MS = 24 * 60 * 60 * 1000
 
-type SessionLike = Pick<Session, 'date' | 'terminated'>
+type SessionLike = Pick<Session, 'date' | 'terminated' | 'countsTowardDailySessions'>
 
 function safeCompleted(value: unknown): number {
   const n = Number(value)
@@ -18,7 +18,7 @@ export function countCompletedSessionsForDate(
   sessions: readonly SessionLike[],
   dateKey: string,
 ): number {
-  return sessions.filter(session => session.date === dateKey && session.terminated).length
+  return sessions.filter(session => session.date === dateKey && session.terminated && session.countsTowardDailySessions !== false).length
 }
 
 export function normalizeDailyUsage(options: {
