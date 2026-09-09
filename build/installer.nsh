@@ -55,7 +55,10 @@
   FileWrite $R1 '  <name>Playtime Pact Privileged Broker</name>$\r$\n'
   FileWrite $R1 '  <description>Protected accounting and enforcement broker for Playtime Pact.</description>$\r$\n'
   FileWrite $R1 '  <executable>$INSTDIR\Playtime Pact.exe</executable>$\r$\n'
-  FileWrite $R1 '  <arguments>--privileged-broker-service</arguments>$\r$\n'
+  ; Keep the explicit bootstrap flag on the SYSTEM service. The protected
+  ; usage initializer is idempotent once the store exists, and only SYSTEM
+  ; can migrate the legacy SYSTEM-only HMAC record without weakening its ACL.
+  FileWrite $R1 '  <arguments>--privileged-broker-service --initialize-local-protection</arguments>$\r$\n'
   FileWrite $R1 '  <serviceaccount>$\r$\n'
   FileWrite $R1 '    <domain>NT AUTHORITY</domain>$\r$\n'
   FileWrite $R1 '    <user>SYSTEM</user>$\r$\n'
@@ -74,6 +77,19 @@
       MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be installed."
       Abort
     ${EndIf}
+  ${Else}
+    ; Re-register the existing WinSW service on upgrades so the SYSTEM
+    ; bootstrap argument in the adjacent XML is applied as well.
+    ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" uninstall' $R5
+    ${If} $R5 != 0
+      MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be re-registered."
+      Abort
+    ${EndIf}
+    ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" install' $R5
+    ${If} $R5 != 0
+      MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be re-installed."
+      Abort
+    ${EndIf}
   ${EndIf}
   ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" start' $R5
   ${If} $R5 != 0
@@ -81,7 +97,7 @@
     MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be started."
     Abort
   ${EndIf}
-  nsExec::ExecToStack '"$INSTDIR\Playtime Pact.exe" --privileged-broker-health-check'
+  nsExec::ExecToStack '"$INSTDIR\Playtime Pact.exe" --protection-readiness-check'
   Pop $R5
   Pop $R4
   ${If} $R5 != 0
@@ -126,23 +142,67 @@
     MessageBox MB_OK|MB_ICONSTOP "PIN verification failed. Uninstall cancelled."
     Abort
   ${EndIf}
-  FileOpen $R1 "C:\ProgramData\PlaytimePact\watchdog-disabled.flag" w
-  FileWrite $R1 'uninstall'
-  FileClose $R1
-  ExecWait 'schtasks /delete /tn "PlaytimePact" /f'
-  ExecWait 'schtasks /delete /tn "MyPact" /f'
-  ExecWait 'schtasks /delete /tn "MyPactForMyFuture" /f'
-  ExecWait 'taskkill /F /IM "Playtime Pact.exe" /T'
-  ExecWait 'taskkill /F /IM "My Pact.exe" /T'
-  ExecWait 'taskkill /F /IM "MyPact.exe" /T'
-  ExecWait 'taskkill /F /IM powershell.exe /FI "WINDOWTITLE eq PlaytimePactWatchdog" /T'
-  ExecWait 'taskkill /F /IM powershell.exe /FI "WINDOWTITLE eq MyPactWatchdog" /T'
-  ExecWait `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { ($$_.Name -eq 'powershell.exe' -or $$_.Name -eq 'wscript.exe') -and ($$_.CommandLine -like '*watch-loop.ps1*' -or $$_.CommandLine -like '*start-watch-loop.vbs*') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force }"`
-  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop'
-  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" uninstall'
 !macroend
 
 !macro customUnInstall
+  ; Stop execution reversibly. Keep service registration and policy selectors
+  ; until the file move has succeeded, so a lock cannot strand the installation.
+  IfFileExists "C:\ProgramData\PlaytimePact\watchdog-disabled.flag" 0 +2
+    CopyFiles /SILENT "C:\ProgramData\PlaytimePact\watchdog-disabled.flag" "$PLUGINSDIR\previous-watchdog-disabled.flag"
+  FileOpen $R1 "C:\ProgramData\PlaytimePact\watchdog-disabled.flag" w
+  FileWrite $R1 'uninstall'
+  FileClose $R1
+  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop' $R3
+  ${If} $R3 != 0
+    Delete "C:\ProgramData\PlaytimePact\watchdog-disabled.flag"
+    IfFileExists "$PLUGINSDIR\previous-watchdog-disabled.flag" 0 +2
+      CopyFiles /SILENT "$PLUGINSDIR\previous-watchdog-disabled.flag" "C:\ProgramData\PlaytimePact\watchdog-disabled.flag"
+    MessageBox MB_OK|MB_ICONSTOP "The protection service could not be stopped. No installation files were removed."
+    Abort "Protection service stop failed."
+  ${EndIf}
+  ExecWait 'taskkill /F /IM "Playtime Pact.exe" /T'
+!macroend
+
+!macro customRemoveFiles
+  ; Stage files before irreversible cleanup (also for explicit uninstall).
+  CreateDirectory "$PLUGINSDIR\old-install"
+  Push ""
+  Call un.atomicRMDir
+  Pop $R0
+  ${If} $R0 != 0
+    StrCpy $R2 $R0
+    Push ""
+    Call un.restoreFiles
+    Pop $R0
+    Delete "C:\ProgramData\PlaytimePact\watchdog-disabled.flag"
+    IfFileExists "$PLUGINSDIR\previous-watchdog-disabled.flag" 0 +2
+      CopyFiles /SILENT "$PLUGINSDIR\previous-watchdog-disabled.flag" "C:\ProgramData\PlaytimePact\watchdog-disabled.flag"
+    ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" start' $R3
+    ${If} $R3 == 0
+      nsExec::ExecToStack '"$INSTDIR\Playtime Pact.exe" --protection-readiness-check'
+      Pop $R3
+      Pop $R4
+    ${EndIf}
+    ${If} $R3 == 0
+      ${IfNot} ${FileExists} "$PLUGINSDIR\previous-watchdog-disabled.flag"
+        ${StdUtils.ExecShellAsUser} $0 "$INSTDIR\Playtime Pact.exe" "open" "--hidden"
+      ${EndIf}
+      MessageBox MB_OK|MB_ICONSTOP "A file is in use: $R2$\r$\nThe protection service passed its readiness check after recovery. Installation was cancelled; close the application holding this file before retrying."
+    ${Else}
+      MessageBox MB_OK|MB_ICONSTOP "A file is in use: $R2$\r$\nAutomatic recovery did not pass the protection readiness check. The installation is NOT complete. Keep this window open and request repair."
+    ${EndIf}
+    Abort "Installation files are in use."
+  ${EndIf}
+  ; The wrapper is now in staging. sc deletes only this verified service entry;
+  ; existing protected policy/usage/PIN data and selectors are never removed.
+  ExecWait 'sc.exe delete PlaytimePactPrivilegedBroker' $R3
+  ${If} $R3 != 0
+    Push ""
+    Call un.restoreFiles
+    Pop $R0
+    MessageBox MB_OK|MB_ICONSTOP "The service could not be unregistered. Installation was stopped and file restoration was attempted. Protection requires a repair check."
+    Abort "Protection service removal failed."
+  ${EndIf}
   ExecWait 'schtasks /delete /tn "PlaytimePact" /f'
   ExecWait 'schtasks /delete /tn "MyPact" /f'
   ExecWait 'schtasks /delete /tn "MyPactForMyFuture" /f'
@@ -159,11 +219,8 @@
   ExecWait 'taskkill /F /IM powershell.exe /FI "WINDOWTITLE eq PlaytimePactWatchdog" /T'
   ExecWait 'taskkill /F /IM powershell.exe /FI "WINDOWTITLE eq MyPactWatchdog" /T'
   ExecWait `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { ($$_.Name -eq 'powershell.exe' -or $$_.Name -eq 'wscript.exe') -and ($$_.CommandLine -like '*watch-loop.ps1*' -or $$_.CommandLine -like '*start-watch-loop.vbs*') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force }"`
-  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop'
-  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" uninstall'
-  Delete "$INSTDIR\PlaytimePactPrivilegedBroker.xml"
-  Delete "$INSTDIR\PlaytimePactPrivilegedBroker.exe"
-  Delete "$INSTDIR\PlaytimePactPrivilegedBroker.exe.config"
-  DeleteRegKey HKLM "Software\PlaytimePact"
+  ; Do not delete Software\PlaytimePact: it contains PolicySelectors.
   DeleteRegKey HKLM "Software\MyPact"
+  SetOutPath $TEMP
+  RMDir /r "$INSTDIR"
 !macroend

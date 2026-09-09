@@ -8,7 +8,7 @@ import builderConfig from '../electron-builder.config.cjs'
 import { loadRemoteApprovalRuntimeConfig, loadRemoteApprovalRuntimeConfigMetadata } from '../src/main/remoteApproval/runtimeBroker'
 import { privilegedPipeSddl } from '../src/main/remoteApproval/privilegedService'
 
-const mainHarness = vi.hoisted(() => ({ serviceWaiters: [] }))
+const mainHarness = vi.hoisted(() => ({ serviceWaiters: [], accountingDirectory: null }))
 vi.mock('electron', () => ({
   app: {
     exit: vi.fn(),
@@ -29,6 +29,14 @@ vi.mock('../src/main/remoteApproval/privilegedService', async (importOriginal) =
   const actual = await importOriginal()
   return {
     ...actual,
+    // Main's service branch uses the protected production path. These handoff
+    // tests must never depend on (or load) the installed household's policy.
+    PrivilegedApprovalService: class extends actual.PrivilegedApprovalService {
+      constructor(operational, membership, accounting, _directory, ...rest) {
+        super(operational, membership, accounting, mainHarness.accountingDirectory, ...rest)
+      }
+      static loadAccounting() { return actual.PrivilegedApprovalService.loadAccounting(mainHarness.accountingDirectory) }
+    },
     __actualNamedPipeTransport: actual.namedPipeTransport,
     __actualStartPrivilegedPipeServer: actual.startPrivilegedPipeServer,
     startPrivilegedPipeServer: async (service) => {
@@ -77,6 +85,9 @@ function sandbox() {
 }
 
 async function captureMainPrivilegedService() {
+  const isolatedState = mkdtempSync(join(tmpdir(), 'playtime-pact-handoff-service-'))
+  sandboxes.push(isolatedState)
+  mainHarness.accountingDirectory = isolatedState
   let resolveService
   const serviceStarted = new Promise((resolve) => { resolveService = resolve })
   mainHarness.serviceWaiters.push(resolveService)
