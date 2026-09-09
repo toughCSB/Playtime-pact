@@ -35,6 +35,36 @@ Minecraft Launcher와 Lunar Client의 **런처 창만 열어 두는 것은 게�
 
 > 자동 종료는 월드 저장을 보장하지 않습니다. 경고가 나오면 직접 저장하고 종료해 주세요. 강제 종료가 필요한 경우 저장하지 않은 진행 상황이 손실될 수 있습니다. 정상 종료 유예와 시작 중인 게임의 창 생성 대기가 있어 시간 만료 즉시 프로세스가 사라지는 것은 아닙니다.
 
+## 앱 화면
+
+### 메인·설정 인증·관리자 화면
+
+| 메인 화면 | 설정 진입 시 부모 PIN | 관리자 화면 |
+| :---: | :---: | :---: |
+| <img src="screenshots/main-screen.png" alt="Playtime Pact 메인 화면" width="280"> | <img src="screenshots/settings-screen.png" alt="설정 진입 시 부모 PIN 입력 화면" width="280"> | <img src="screenshots/admin-screen.png" alt="부모 관리자 PIN 입력 화면" width="280"> |
+
+메인 화면에서 오늘 사용할 수 있는 시간과 횟수를 확인합니다. 설정과 부모 제어는 PIN 인증 뒤에 열립니다.
+
+### 게임 중 타이머 색상
+
+| 5분 초과 | 5분 이하 |
+| :---: | :---: |
+| <img src="screenshots/timer-green.png" alt="남은 시간이 5분을 초과한 초록색 타이머" width="380"> | <img src="screenshots/timer-yellow.png" alt="남은 시간이 5분 이하인 노란색 타이머" width="380"> |
+
+| 3분 이하 | 1분 이하 |
+| :---: | :---: |
+| <img src="screenshots/timer-orange.png" alt="남은 시간이 3분 이하인 주황색 타이머" width="380"> | <img src="screenshots/timer-red.png" alt="남은 시간이 1분 이하인 빨간색 타이머" width="380"> |
+
+게임 중에는 작은 오버레이로 남은 시간을 보여 주며, 종료 시각이 가까워질수록 색상이 바뀝니다.
+
+### 종료 전 경고와 마지막 카운트다운
+
+| 단계별 경고 | 마지막 10초 카운트다운 |
+| :---: | :---: |
+| <img src="screenshots/timer-warning.png" alt="게임 종료 전 중앙 경고 화면" width="380"> | <img src="screenshots/timer-countdown.png" alt="게임 종료 전 마지막 카운트다운 화면" width="380"> |
+
+경고 시 타이머가 화면 중앙으로 이동했다가 코너로 돌아오며, 마지막 10초에는 중앙에서 계속 카운트다운합니다.
+
 ## Windows에 설치하기
 
 대상은 **Windows x64**이며, 현재 실제 검증 환경은 Windows 11입니다.
