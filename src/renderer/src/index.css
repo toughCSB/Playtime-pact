@@ -1034,6 +1034,68 @@ textarea:focus-visible {
   line-height: 1.4;
 }
 
+.ppt-lock-state--complete {
+  gap: 20px;
+  padding: 28px 24px 18px;
+  min-height: 340px;
+  justify-content: center;
+  text-align: center;
+  border: 2px solid #64b68a;
+  border-radius: 24px;
+  background: linear-gradient(155deg, #ffffff 0%, #e7f7ec 65%, #fff6d9 100%);
+  box-shadow: 0 12px 28px rgba(30, 100, 62, 0.15);
+}
+
+.ppt-lock-state--complete strong {
+  color: #12633e;
+  font-size: 1.5rem;
+  font-weight: 900;
+  line-height: 1.45;
+  word-break: keep-all;
+}
+.ppt-lock-state--complete p {
+  color: #244a6b;
+  font-size: 1.18rem;
+  font-weight: 800;
+  line-height: 1.65;
+  word-break: keep-all;
+}
+.ppt-lock-state__encouragement {
+  color: #a65306;
+  font-size: 2rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.ppt-lock-state__request {
+  align-self: flex-end;
+  margin-top: 8px;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid #9bbba7;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #41614f;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ppt-lock-state__request:hover { background: #fff; border-color: #36724f; }
+.ppt-lock-state__request:focus-visible { outline: 2px solid #217548; outline-offset: 3px; }
+
+.ppt-shell--daily-complete .ppt-clock-card {
+  flex-shrink: 0;
+  padding: 10px 14px;
+  margin-bottom: 0;
+  border-radius: 12px;
+  box-shadow: none;
+}
+.ppt-shell--daily-complete .ppt-clock-card__copy { display: flex; align-items: center; justify-content: space-between; width: 100%; }
+.ppt-shell--daily-complete .ppt-clock-card__label { margin: 0; }
+.ppt-shell--daily-complete .ppt-clock-card__value { font-size: 1.3rem; }
+.ppt-shell--daily-complete .ppt-clock-card > .ppt-voxel-scene { display: none; }
+.ppt-shell--daily-complete .ppt-action-zone { flex: 1 0 auto; justify-content: center; padding: 18px 0; margin-bottom: 0; }
+
 .ppt-rules-details {
   margin: 0 16px;
   padding: 10px 13px;
@@ -1775,6 +1837,13 @@ textarea:focus-visible {
 }
 
 @media (max-width: 320px), (max-height: 579px) {
+  .ppt-shell--daily-complete .ppt-lock-state--complete { min-height: 0; padding: 18px 16px 12px; gap: 12px; }
+  .ppt-shell--daily-complete .ppt-lock-state--complete strong { font-size: 1.25rem; line-height: 1.4; }
+  .ppt-shell--daily-complete .ppt-lock-state--complete p { font-size: 0.95rem; line-height: 1.5; }
+  .ppt-shell--daily-complete .ppt-lock-state__encouragement { font-size: 1.5rem; white-space: nowrap; }
+  .ppt-shell--daily-complete .ppt-action-zone { padding: 12px 0; }
+  .ppt-shell--daily-complete .ppt-rules-details,
+  .ppt-shell--daily-complete .ppt-meadow { display: none; }
   .ppt-phone-shell {
     padding: 15px 6px 9px;
     border-radius: 27px;
@@ -1790,6 +1859,19 @@ textarea:focus-visible {
 }
 
 @media (max-width: 260px), (max-height: 460px) {
+  .ppt-shell--daily-complete .ppt-topbar { padding: 10px 12px; gap: 6px; }
+  .ppt-shell--daily-complete .ppt-brand { gap: 6px; }
+  .ppt-shell--daily-complete .ppt-brand__mark { display: none; }
+  .ppt-shell--daily-complete .ppt-brand__copy strong { font-size: 0.85rem; white-space: nowrap; }
+  .ppt-shell--daily-complete .ppt-brand__copy span { display: none; }
+  .ppt-shell--daily-complete .ppt-lock-state--complete { padding: 14px 12px 10px; gap: 8px; }
+  .ppt-shell--daily-complete .ppt-lock-state--complete strong { font-size: 1.05rem; }
+  .ppt-shell--daily-complete .ppt-lock-state--complete p { font-size: 0.84rem; line-height: 1.4; }
+  .ppt-shell--daily-complete .ppt-lock-state__encouragement { font-size: 1.25rem; }
+  .ppt-shell--daily-complete .ppt-clock-card { padding: 6px 10px; }
+  .ppt-shell--daily-complete .ppt-clock-card__value { font-size: 1rem; }
+  .ppt-shell--daily-complete .ppt-action-zone { padding: 8px 0; margin-inline: 10px; }
+  .ppt-shell--daily-complete .ppt-lock-state__request { margin-top: 2px; min-height: 24px; padding-block: 3px; }
   .ppt-modal-backdrop {
     padding: 6px;
   }

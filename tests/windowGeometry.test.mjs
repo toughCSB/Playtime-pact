@@ -41,6 +41,31 @@ describe('full-page window geometry', () => {
 })
 
 describe('compact overlay geometry', () => {
+  it.each([
+    {
+      label: '1080p',
+      workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+      corner: { width: 200, height: 84, x: 1696, y: 26 },
+      warning: { width: 320, height: 140, x: 800, y: 294 },
+    },
+    {
+      label: '4K',
+      workArea: { x: 0, y: 0, width: 3840, height: 2080 },
+      corner: { width: 360, height: 151, x: 3448, y: 32 },
+      warning: { width: 480, height: 200, x: 1680, y: 628 },
+    },
+  ])('places overlays correctly on $label landscape displays', ({ workArea, corner, warning }) => {
+    const actualCorner = getCornerOverlayGeometry(workArea)
+    const actualWarning = getWarningOverlayGeometry(workArea)
+
+    expect(actualCorner).toEqual(corner)
+    expect(actualWarning).toEqual(warning)
+    expect(actualCorner.x + actualCorner.width).toBeLessThan(workArea.x + workArea.width)
+    expect(actualCorner.y).toBeGreaterThan(workArea.y)
+    expect(actualWarning.x + actualWarning.width / 2).toBe(workArea.x + workArea.width / 2)
+    expect(actualWarning.y + actualWarning.height / 2).toBeLessThan(workArea.y + workArea.height / 2)
+  })
+
   it('anchors the default timer to relative top-right work-area insets', () => {
     expect(getCornerOverlayGeometry({ x: 0, y: 0, width: 1920, height: 1040 }))
       .toEqual({ width: 200, height: 84, x: 1696, y: 26 })

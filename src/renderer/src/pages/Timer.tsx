@@ -11,6 +11,7 @@ import PhoneBottomNav from '../components/PhoneBottomNav'
 import { INITIAL_TIMER_PRESENTATION, reduceTimerPresentation } from '../timerPresentation'
 
 interface Props {
+  visible?: boolean
   onOpenSettings: () => void
   onActiveChange?: (active: boolean) => void
   requestedSurface?: 'play' | 'rules'
@@ -59,7 +60,7 @@ function OverlayRoot({ children, dragEverywhere = false }: { children: ReactNode
   )
 }
 
-export default function Timer({ onOpenSettings, onActiveChange, requestedSurface = 'play' }: Props) {
+export default function Timer({ onOpenSettings, onActiveChange, requestedSurface = 'play', visible = true }: Props) {
   const [settings, setSettings] = useState<PublicSettings | null>(null)
   const [remainingSeconds, setRemainingSeconds] = useState(0)
   const [isRunning, setIsRunning] = useState(false)
@@ -114,8 +115,8 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
   useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
   useEffect(() => { dailyExhaustedRef.current = dailyExhausted }, [dailyExhausted])
   useEffect(() => {
-    onActiveChange?.(isRunning || presentation.mode === 'termination-failed-sticky')
-  }, [isRunning, onActiveChange, presentation.mode])
+    onActiveChange?.(isRunning || presentation.mode === 'termination-failed-sticky' || presentation.blockedReason !== null)
+  }, [isRunning, onActiveChange, presentation.mode, presentation.blockedReason])
   useEffect(() => {
     setSurface(requestedSurface)
   }, [requestedSurface])
@@ -129,8 +130,11 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
     void api.readSettings()
       .then(setSettings)
       .catch(() => showBanner('설정을 불러오지 못했어요.'))
-    refreshDailyUsage()
   }, [])
+
+  useEffect(() => {
+    if (visible) refreshDailyUsage()
+  }, [visible])
 
   function refreshDailyUsage() {
     const getDailyRemaining = window.api?.dailyGetRemaining
@@ -270,12 +274,12 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
     if (result?.blocked) {
       setSessionStartTime('')
       setBlockedMessage(result.blocked === 'outside-hours'
-        ? `${activeSettings.allowedStartHour}시 ~ ${activeSettings.allowedEndHour}시에만 지원 게임을 실행할 수 있어요.`
+        ? `${activeSettings.allowedStartHour}시 ~ ${activeSettings.allowedEndHour}시에만 게임을 실행할 수 있어요.`
         : result.blocked === 'approval-required'
-          ? '부모님 PIN 승인 후 지원 게임을 시작할 수 있어요.'
+          ? '부모님 PIN 승인 후 게임을 시작할 수 있어요.'
           : result.blocked === 'managed-game-not-running'
-            ? '지원 게임이 실행 중일 때만 타이머가 시작돼요.'
-            : '지원 게임을 시작할 수 없어요.')
+            ? '게임이 실행 중일 때만 타이머가 시작돼요.'
+            : '게임을 시작할 수 없어요.')
       refreshDailyUsage()
       return
     }
@@ -322,7 +326,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
       }
       setApprovalError('')
       setApprovalOpen(false)
-      showBanner('PIN 승인 완료. 타이머는 시작되지 않아요. 지원 게임을 직접 다시 실행해주세요.')
+      showBanner('PIN 승인 완료. 타이머는 시작되지 않아요. 게임을 직접 다시 실행해주세요.')
       return
     } finally {
       setApprovalPending(false)
@@ -472,6 +476,10 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
     return api.onSupportedGameBlocked(({ gameId, message, reason }) => {
       setRemoteRequestGameId(gameId)
       setBlockedMessage(message)
+      if (reason === 'daily-exhausted') {
+        setDailyExhausted(true)
+        setDailyRemainingSeconds(0)
+      }
       dispatchPresentation({ type: 'BLOCKED', reason })
       refreshDailyUsage()
     })
@@ -522,7 +530,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
     ? secondaryGameIds.length > 0
       ? `${primaryGameLabel} + ${secondaryGameIds.map(getManagedGameDisplayName).join(', ')}`
       : primaryGameLabel
-    : '지원 게임'
+    : '현재 남은 시간 경고'
 
   useEffect(() => {
     if (approvalOpen && approvalPin.length === 4 && !approvalPending && !isRunning) {
@@ -554,13 +562,13 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
   }
 
   const lockTitle = dailyExhausted
-    ? '오늘 게임 시간을 다 썼어요'
+    ? '금일 약속된 게임 타임이 종료되었습니다.'
     : hour < displaySettings.allowedStartHour
       ? `${displaySettings.allowedStartHour}시부터 시작할 수 있어요`
       : '오늘 플레이 시간이 끝났어요'
 
   const lockCopy = dailyExhausted
-    ? '내일이 되면 새로운 세션이 다시 열려요.'
+    ? '당신의 인생이 플러스가 될 게임을 시작할 시간입니다.'
     : `플레이 가능 시간은 ${displaySettings.allowedStartHour}시 ~ ${displaySettings.allowedEndHour}시예요.`
 
   if (isRunning) {
@@ -572,7 +580,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
         <OverlayRoot dragEverywhere>
           <div className="ppt-overlay-card ppt-overlay-card--shutdown" style={{ '--ppt-accent': color, '--ppt-glow': glow } as CSSProperties}>
             <span className="ppt-overlay-card__eyebrow">{terminationError ? '종료 확인 필요' : '게임 시간 완료'}</span>
-            <strong className="ppt-overlay-card__title">{terminationError ? '게임을 닫지 못했어요' : '지원 게임 종료 중...'}</strong>
+            <strong className="ppt-overlay-card__title">{terminationError ? '게임을 닫지 못했어요' : '게임 종료 중...'}</strong>
             <p className="ppt-overlay-card__copy">{terminationError ?? '오늘 약속한 게임 시간이 끝났어요.'}</p>
           </div>
         </OverlayRoot>
@@ -638,7 +646,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
         />
       )}
     >
-      <div className="ppt-shell">
+      <div className={`ppt-shell${dailyExhausted && surface === 'play' ? ' ppt-shell--daily-complete' : ''}`}>
       <div className="ppt-topbar app-drag">
         <div className="ppt-brand app-drag">
           <div className="ppt-brand__mark">P</div>
@@ -664,7 +672,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
         </div>
       ) : null}
 
-      {blockedMessage ? (
+      {blockedMessage && !dailyExhausted ? (
         <div className={`ppt-floating-banner ppt-floating-banner--danger no-drag${bannerMessage ? ' has-offset' : ''}`}>
           {blockedMessage}
         </div>
@@ -724,7 +732,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
                 {remoteState?.lifecycle === 'request-pending' && !remoteRequestExpired ? (
                   <><strong>부모님 응답 대기 중 · {formatTime(remoteSecondsRemaining)}</strong><p>요청은 5분 뒤 만료돼요. 승인되면 게임을 직접 다시 실행해주세요.</p></>
                 ) : remoteState?.lifecycle === 'approved' && !remoteRequestExpired ? (
-                  <><strong>승인됨 · {formatTime(remoteSecondsRemaining)}</strong><p>자동으로 게임을 시작하지 않아요. {primaryGameLabel ?? '지원 게임'}을 직접 다시 실행해주세요.</p></>
+                  <><strong>승인됨 · {formatTime(remoteSecondsRemaining)}</strong><p>자동으로 게임을 시작하지 않아요. {primaryGameLabel ?? '게임'}을 직접 다시 실행해주세요.</p></>
                 ) : remoteRequestExpired ? (
                   <><strong>요청 또는 승인이 만료됐어요.</strong><p>게임이 실행 중이면 새 승인 요청을 보낼 수 있어요.</p></>
                 ) : remoteLoading ? (
@@ -732,16 +740,18 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
                 ) : remoteIsOutage ? (
                   <><strong>부모님 승인 서비스 연결 안 됨</strong><p>이 경우에만 부모님 PIN 대체 승인을 사용할 수 있어요.</p></>
                 ) : (
-                  <><strong>원격 승인 준비됨</strong><p>지원 게임을 실행한 뒤 승인 요청을 보내주세요.</p></>
+                  <><strong>원격 승인 준비됨</strong><p>게임을 실행한 뒤 승인 요청을 보내주세요.</p></>
                 )}
                 {remoteError ? <p className="ppt-inline-message ppt-inline-message--danger">{remoteError}</p> : null}
               </div>
             ) : null}
           </>
         ) : (
-          <div className="ppt-lock-state">
+          <div className={`ppt-lock-state${dailyExhausted ? ' ppt-lock-state--complete' : ''}`} role="status">
             <strong>{lockTitle}</strong>
             <p>{lockCopy}</p>
+            {dailyExhausted ? <span className="ppt-lock-state__encouragement">Do Your Best !!</span> : null}
+            {dailyExhausted && !displaySettings.requireApprovalBeforeStart ? <button type="button" className="ppt-lock-state__request" aria-label="부모님께 추가 시간 요청" onClick={onOpenSettings}>추가 요청</button> : null}
           </div>
         )}
 

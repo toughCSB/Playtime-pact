@@ -113,9 +113,14 @@ export default function App() {
     <div ref={appBackgroundRef} className="ppt-app-root">
       <div hidden={page !== 'timer'}>
         <Timer
+          visible={page === 'timer'}
           requestedSurface={timerDestination}
           onActiveChange={(active) => {
-            if (active) setPage('timer')
+            if (active) {
+              closeSettingsPin()
+              setTimerDestination('play')
+              setPage('timer')
+            }
           }}
           onOpenSettings={() => {
             settingsTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null

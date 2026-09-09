@@ -34,6 +34,14 @@ describe('native window presentation contract', () => {
     expect(main).toContain('lastCornerOverlayBounds ??')
   })
 
+  it('keeps shutdown at the warning position and warning restore at the saved corner', () => {
+    const main = read('src/main/main.ts')
+    const shutdown = main.slice(main.indexOf('function completeActiveTimer'), main.indexOf('function adjustActiveTimer'))
+    expect(shutdown).toContain('getCenterInfo()')
+    expect(shutdown).toContain("mainWindowPresentation = 'shutdown-overlay'")
+    expect(main).toContain('setTimeout(() => restoreCornerAfterPopup(win, epoch), 4000)')
+  })
+
   it('moves direct termination failures to the existing center geometry without a fake shutdown event', () => {
     const main = read('src/main/main.ts')
     const helper = main.slice(main.indexOf('function moveToBlockedFailureOverlay'), main.indexOf('function clearBlockedFailureViaGameClosed'))
@@ -51,11 +59,11 @@ describe('native window presentation contract', () => {
   it('keeps unavailable process inspection from being treated as a zero-game closure', () => {
     const main = read('src/main/main.ts')
     const runtime = read('src/main/managedGameRuntime.ts')
-    expect(runtime).toContain('export function getManagedGameSnapshotCapture(): ManagedGameCaptureResult')
+    expect(runtime).toContain('export function getManagedGameSnapshotCapture(): Promise<ManagedGameCaptureResult>')
     expect(main.match(/if \(!capture\.succeeded\) return/g).length).toBeGreaterThanOrEqual(2)
-    expect(main).toContain('const capture = getManagedGameSnapshotCapture()')
+    expect(main).toContain('const capture = await getManagedGameSnapshotCapture()')
     const activeTimerLoop = main.slice(main.indexOf('timerInterval = setInterval'), main.indexOf('function tryResumeTimer'))
-    expect(activeTimerLoop).toContain('if (capture.succeeded)')
+    expect(activeTimerLoop).not.toContain('getManagedGameSnapshotCapture()')
     expect(activeTimerLoop).not.toContain('if (!capture.succeeded) return')
     expect(activeTimerLoop).toContain('if (!isAllowedHour())')
   })
@@ -77,6 +85,8 @@ describe('native window presentation contract', () => {
       main.indexOf('function showSupportedGameBlocked'),
     )
     expect(clearFailure).toContain("reason === 'approval-required'")
+    expect(clearFailure).toContain("reason === 'daily-exhausted'")
+    expect(clearFailure).toContain("lastManagedGameBlockedReason = ''")
     expect(main).toContain("reason: 'outside-hours' | 'daily-exhausted' | 'approval-required'")
   })
 

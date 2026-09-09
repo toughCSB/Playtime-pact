@@ -35,6 +35,10 @@ export default function SettingsPage({ onBack }: Props) {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [timeAdding, setTimeAdding] = useState(false)
+  const timeAddingRef = useRef(false)
+  const [timeMessage, setTimeMessage] = useState('')
+  const [timeError, setTimeError] = useState(false)
   const [shutdownConfirmOpen, setShutdownConfirmOpen] = useState(false)
   const [remoteHealth, setRemoteHealth] = useState<RemoteApprovalHealth | null>(null)
   const [pairing, setPairing] = useState<(PairingSession & { uri: string }) | null>(null)
@@ -214,6 +218,24 @@ export default function SettingsPage({ onBack }: Props) {
     }
   }
 
+  const addParentTime = async (minutes: number) => {
+    if (timeAddingRef.current) return
+    timeAddingRef.current = true
+    setTimeAdding(true)
+    setTimeMessage('시간을 추가하고 있어요...')
+    setTimeError(false)
+    try {
+      if (!window.api) throw new Error('Admin service unavailable')
+      const result = await window.api.timerAdjustTime(minutes)
+      setTimeMessage(`${minutes}분을 추가했어요. 남은 시간은 ${Math.ceil(result.remainingSeconds / 60)}분이에요. 게임을 켜면 사용할 수 있어요.`)
+    } catch (error) {
+      setTimeError(true)
+      setTimeMessage(String(error).includes('Start a game before')
+        ? '게임 실행 중이거나 오늘 기본 시간을 모두 사용한 뒤 추가할 수 있어요.'
+        : '시간을 추가하지 못했어요. 부모님 PIN으로 다시 들어온 뒤 시도해주세요.')
+    } finally { timeAddingRef.current = false; setTimeAdding(false) }
+  }
+
   return (
     <div ref={remoteBackgroundRef} className="ppt-shell ppt-shell--settings">
       <div className="ppt-topbar app-drag">
@@ -342,15 +364,25 @@ export default function SettingsPage({ onBack }: Props) {
               />
             </label>
           </div>
-          <p className="ppt-helper-text">{settings.allowedStartHour}시부터 {settings.allowedEndHour}시까지 지원 게임 시작을 허용해요.</p>
+          <p className="ppt-helper-text">{settings.allowedStartHour}시부터 {settings.allowedEndHour}시까지 게임 시작을 허용해요.</p>
         </SettingsCard>
 
-        <SettingsCard title="시작 승인 방식" subtitle="새 세션 시작 정책">
+        <SettingsCard title="오늘 추가 시간" subtitle="부모님 PIN 승인으로 즉시 적용">
+          <p className="ppt-helper-text">게임 실행 중이거나 오늘 기본 시간을 모두 쓴 뒤 시간을 더 줄 수 있어요. 허용 종료 시각은 그대로 지켜요.</p>
+          <div className="ppt-chip-grid">
+            {[5, 15, 30].map((minutes) => <button key={minutes} type="button" className="ppt-chip ppt-chip--positive" disabled={timeAdding} onClick={() => void addParentTime(minutes)}>+{minutes}분</button>)}
+          </div>
+          <div className="ppt-status-slot" role="status" aria-live="polite">
+            {timeMessage ? <p className={`ppt-inline-message ${timeError ? 'ppt-inline-message--danger' : 'ppt-inline-message--success'}`}>{timeMessage}</p> : null}
+          </div>
+        </SettingsCard>
+
+        <SettingsCard title="시작 승인 방식" subtitle="모바일 연동은 선택 사항">
           <label className="ppt-toggle-card">
             <div>
-              <strong>부모님 승인 후 게임 시작</strong>
+              <strong>모바일 부모님 승인 사용</strong>
               <p>
-                켜두면 새 게임 타임마다 원격 승인 요청이 필요해요. 원격 서비스 장애 시에만 부모님 PIN 대체 승인을 사용할 수 있어요.
+                해제하면 정해진 시간에는 바로 플레이해요. 설정 변경과 추가 시간은 이 PC에서 부모님 PIN으로 승인해요. 켜면 새 게임 타임마다 연결된 모바일의 승인을 받아요.
               </p>
             </div>
             <span className={`ppt-toggle${settings.requireApprovalBeforeStart ? ' is-on' : ''}`} aria-hidden="true">
@@ -364,7 +396,7 @@ export default function SettingsPage({ onBack }: Props) {
             />
           </label>
         </SettingsCard>
-        <SettingsCard title="원격 부모님 승인" subtitle={remoteStatus === 'loading' ? '상태 확인 중' : remoteStatus === 'error' ? '상태 확인 실패' : `서비스 ${remoteHealth?.lifecycle ?? '알 수 없음'}`}>
+        {settings.requireApprovalBeforeStart && <SettingsCard title="원격 부모님 승인" subtitle={remoteStatus === 'loading' ? '상태 확인 중' : remoteStatus === 'error' ? '상태 확인 실패' : `서비스 ${remoteHealth?.lifecycle ?? '알 수 없음'}`}>
           <div className="ppt-remote-admin" aria-live="polite">
             {remoteStatus === 'loading' ? <p><strong>상태 확인 중</strong> · 부모님 기기와 서비스 정보를 불러오고 있어요.</p> : null}
             {remoteStatus === 'error' ? <p><strong>상태 확인 실패</strong> · 새로고침 후 다시 시도해주세요.</p> : null}
@@ -387,9 +419,9 @@ export default function SettingsPage({ onBack }: Props) {
             {remoteError ? <p className="ppt-inline-message ppt-inline-message--danger">{remoteError}</p> : null}
             {remoteRefreshWarning ? <p className="ppt-inline-message ppt-inline-message--danger">{remoteRefreshWarning}</p> : null}
           </div>
-        </SettingsCard>
+        </SettingsCard>}
 
-        <details className="ppt-danger-zone no-drag">
+        {settings.requireApprovalBeforeStart && <details className="ppt-danger-zone no-drag">
           <summary>원격 승인 복구 · 연결 초기화 또는 가정 삭제</summary>
           <p>연결 초기화는 모든 부모님 기기의 접근을 해제합니다. 가정 삭제는 원격 승인 데이터를 영구 삭제합니다.</p>
           {remoteStatus === 'loading' ? <p className="ppt-helper-text">연결된 부모님 기기를 확인하는 중이에요.</p> : parentDevices.length > 0 ? (
@@ -406,11 +438,11 @@ export default function SettingsPage({ onBack }: Props) {
             <button type="button" className="ppt-button ppt-button--secondary" onClick={() => { remoteTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setRemoteModalError(''); setRemoteAction('reset') }}>모든 부모님 기기 연결 해제</button>
             <button type="button" className="ppt-button ppt-button--danger" onClick={() => { remoteTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setRemoteModalError(''); setRemoteAction('delete') }}>가정 삭제</button>
           </div>
-        </details>
+        </details>}
 
         <details className="ppt-danger-zone no-drag">
           <summary>고급 설정 · 앱 완전 종료</summary>
-          <p>부모님이 직접 종료할 때만 사용해요. 워치독을 중지하고 지원 게임도 함께 닫습니다.</p>
+          <p>부모님이 직접 종료할 때만 사용해요. 워치독을 중지하고 실행 중인 게임도 함께 닫습니다.</p>
           <button type="button" className="ppt-button ppt-button--danger" onClick={() => { shutdownTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setShutdownConfirmOpen(true) }}>
             앱과 워치독 종료
           </button>
@@ -437,7 +469,7 @@ export default function SettingsPage({ onBack }: Props) {
           <div ref={shutdownDialogRef} className="ppt-dialog no-drag" role="dialog" aria-modal="true" aria-labelledby="shutdown-confirm-title" tabIndex={-1}>
             <p className="ppt-dialog__eyebrow">부모님 확인</p>
             <h2 id="shutdown-confirm-title" className="ppt-dialog__title">Playtime Pact를 종료할까요?</h2>
-            <p className="ppt-dialog__copy">앱과 워치독이 멈추고 현재 실행 중인 지원 게임도 종료됩니다.</p>
+            <p className="ppt-dialog__copy">앱과 워치독이 멈추고 현재 실행 중인 게임도 종료됩니다.</p>
             <div className="ppt-actions ppt-actions--dialog">
               <button type="button" className="ppt-button ppt-button--secondary" onClick={closeShutdownConfirm}>취소</button>
               <button type="button" className="ppt-button ppt-button--danger" onClick={() => void handleShutdown()}>완전 종료</button>

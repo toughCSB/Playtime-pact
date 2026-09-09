@@ -143,6 +143,10 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
   const [pwError, setPwError] = useState(false)
   const [addMsg, setAddMsg] = useState('')
   const [addError, setAddError] = useState(false)
+  const [timerActionPending, setTimerActionPending] = useState(false)
+  const timerActionRef = useRef(false)
+  const statusPollingBlockedRef = useRef(true)
+  const [statusUnavailable, setStatusUnavailable] = useState(false)
   const [manualMinutes, setManualMinutes] = useState('')
   const [adjustSign, setAdjustSign] = useState<1 | -1>(1)
   const [changingPassword, setChangingPassword] = useState(false)
@@ -153,16 +157,23 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
   useEffect(() => {
     const api = window.api
     if (!api) {
+      setAddError(true)
       setAddMsg('관리자 서비스에 연결할 수 없어요. 앱을 다시 시작해주세요.')
       setResumeError(true)
       setResumeMsg('재부팅 설정을 불러오지 못했어요.')
     } else {
       void api.timerGetStatus()
         .then((status) => {
+          statusPollingBlockedRef.current = false
           setTimerRunning(status.running)
           setRemainingSeconds(status.remainingSeconds)
         })
-        .catch(() => setAddMsg('타이머 상태를 불러오지 못했어요.'))
+        .catch(() => {
+          statusPollingBlockedRef.current = true
+          setStatusUnavailable(true)
+          setAddError(true)
+          setAddMsg('타이머 상태를 불러오지 못했어요.')
+        })
       void api.adminGetResumeOption()
         .then(setResumeEnabled)
         .catch(() => {
@@ -182,21 +193,53 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
     })
   }, [])
 
+  useEffect(() => {
+    const api = window.api
+    if (!api) return
+    let active = true
+    let pending = false
+    const interval = window.setInterval(async () => {
+      if (pending || timerActionRef.current || statusPollingBlockedRef.current) return
+      pending = true
+      try {
+        const status = await api.timerGetStatus()
+        if (active && !timerActionRef.current) {
+          setTimerRunning(status.running)
+          setRemainingSeconds(status.remainingSeconds)
+        }
+      } catch {
+        statusPollingBlockedRef.current = true
+        if (active) {
+          setStatusUnavailable(true)
+          setAddError(true)
+          setAddMsg('타이머 상태를 불러오지 못했어요.')
+        }
+      }
+      finally { pending = false }
+    }, 1000)
+    return () => { active = false; window.clearInterval(interval) }
+  }, [])
+
   const refreshTimerStatus = async () => {
     const getStatus = window.api?.timerGetStatus
     if (!getStatus) throw new Error('Timer status bridge unavailable')
     const status = await getStatus()
+    statusPollingBlockedRef.current = false
+    setStatusUnavailable(false)
     setTimerRunning(status.running)
     setRemainingSeconds(status.remainingSeconds)
   }
 
   const handleAdjustTime = async (minutes: number) => {
+    if (timerActionRef.current) return
     if (!Number.isInteger(minutes) || minutes === 0) {
       setAddError(true)
       setAddMsg('0이 아닌 분 단위로 입력해주세요')
       setTimeout(() => setAddMsg(''), 2000)
       return
     }
+    timerActionRef.current = true
+    setTimerActionPending(true)
     try {
       setAddError(false)
       const adjustTime = window.api?.timerAdjustTime
@@ -204,17 +247,20 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
       const result = await adjustTime(minutes)
       if (result && isFinite(result.remainingSeconds)) {
         setRemainingSeconds(result.remainingSeconds)
-        setTimerRunning(result.remainingSeconds > 0)
+        await refreshTimerStatus()
       } else {
         await refreshTimerStatus()
       }
       setAddMsg(minutes > 0 ? `+${minutes}분 추가됐어요` : `${minutes}분 차감됐어요`)
       setManualMinutes('')
       setTimeout(() => setAddMsg(''), 2000)
-    } catch {
+    } catch (error) {
       setAddError(true)
-      setAddMsg('시간 변경에 실패했어요')
+      setAddMsg(String(error).includes('Start a game before') ? '게임 실행 중이거나 오늘 시간을 모두 사용한 뒤 추가할 수 있어요.' : '시간 변경에 실패했어요')
       setTimeout(() => setAddMsg(''), 2000)
+    } finally {
+      timerActionRef.current = false
+      setTimerActionPending(false)
     }
   }
 
@@ -224,6 +270,9 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
   }
 
   const handleStopTimer = async () => {
+    if (timerActionRef.current) return
+    timerActionRef.current = true
+    setTimerActionPending(true)
     try {
       setAddError(false)
       const stopTimer = window.api?.timerAdminStop
@@ -231,10 +280,14 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
       await stopTimer()
       setTimerRunning(false)
       setRemainingSeconds(0)
+      setAddMsg('게임을 종료하고 남은 시간을 저장했어요.')
     } catch {
       setAddError(true)
       setAddMsg('타이머 중지에 실패했어요.')
       setTimeout(() => setAddMsg(''), 2000)
+    } finally {
+      timerActionRef.current = false
+      setTimerActionPending(false)
     }
   }
 
@@ -367,16 +420,17 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
               <p className="ppt-card__eyebrow">현재 게임 시간</p>
               <h2 className="ppt-card__title">타이머 상태</h2>
             </div>
-            <span className={`ppt-badge${timerRunning ? ' is-success' : ''}`}>{timerRunning ? '실행 중' : '대기 중'}</span>
+            <span className={`ppt-badge${timerRunning && !statusUnavailable ? ' is-success' : ''}`}>{statusUnavailable ? '상태 확인 불가' : timerRunning ? '실행 중' : '대기 중'}</span>
           </div>
-          {timerRunning ? (
-            <>
+          <div className="ppt-status-slot" role="status" aria-live="polite">
+            {addMsg ? <p className={`ppt-inline-message ${addError ? 'ppt-inline-message--danger' : 'ppt-inline-message--success'}`}>{addMsg}</p> : null}
+            {statusUnavailable ? <p className="ppt-helper-text">자동 재시도를 멈췄어요. 보호 서비스와 초기 설정을 확인한 뒤 관리자 화면을 다시 열어주세요.</p> : null}
+          </div>
+          <>
               <div className="ppt-display ppt-display--compact">
-                <span className="ppt-display__label">남은 시간</span>
+                <span className="ppt-display__label">{timerRunning ? '남은 시간' : '저장된 남은 시간'}</span>
                 <strong className="ppt-display__value">{formatTime(remainingSeconds)}</strong>
               </div>
-
-              {addMsg ? <p className={`ppt-inline-message ${addError ? 'ppt-inline-message--danger' : 'ppt-inline-message--success'}`}>{addMsg}</p> : null}
 
               <div className="ppt-section-block">
                 <div className="ppt-section-block__header">
@@ -392,6 +446,7 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
                     <button
                       key={minutes}
                       type="button"
+                      disabled={timerActionPending}
                       className={`ppt-chip ${adjustSign > 0 ? 'ppt-chip--positive' : 'ppt-chip--warning'}`}
                       onClick={() => handleAdjustTime(adjustSign * minutes)}
                     >
@@ -409,25 +464,26 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
                 <div className="ppt-inline-form">
                   <input
                     type="number"
+                    aria-label="조정할 시간 (분)"
+                    disabled={timerActionPending}
                     value={manualMinutes}
                     placeholder="예: 25 또는 -10"
                     onChange={(event) => setManualMinutes(event.target.value)}
                     onKeyDown={(event) => { if (event.key === 'Enter') void handleManualAdjust() }}
                     className="ppt-input"
                   />
-                  <button type="button" className="ppt-button ppt-button--secondary" onClick={() => void handleManualAdjust()}>
+                  <button type="button" className="ppt-button ppt-button--secondary" disabled={timerActionPending} onClick={() => void handleManualAdjust()}>
                     적용
                   </button>
                 </div>
               </div>
 
-              <button type="button" className="ppt-button ppt-button--danger" onClick={handleStopTimer}>
+              <p className="ppt-helper-text">중지하면 실행 중인 관리 대상 게임을 종료하고 남은 시간을 저장해요.</p>
+              <button type="button" className="ppt-button ppt-button--danger" disabled={timerActionPending || !timerRunning} onClick={handleStopTimer}>
                 타이머 중지
               </button>
-            </>
-          ) : (
-            <p className="ppt-card__body">타이머가 실행 중이 아닙니다.</p>
-          )}
+            {!timerRunning ? <p className="ppt-card__body">게임을 켜면 저장된 시간을 이어서 사용해요. 오늘 기본 시간을 모두 쓴 뒤에도 부모님이 시간을 추가할 수 있어요.</p> : null}
+          </>
         </section>
 
         <section className="ppt-card ppt-card--panel" data-admin-panel="safety">

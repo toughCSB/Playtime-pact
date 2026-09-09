@@ -234,13 +234,19 @@ const run = async () => {
         let win
         const record = { scenario: scenario.id, scenarioMarker: scenario.marker.selector, window: scenario.window, width, height, passed: false, diagnostics: {}, metrics: null }
         try {
-          win = new BrowserWindow({ width, height, useContentSize: true, show: false, frame: false, transparent: true, resizable: false, webPreferences: { preload: preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: false, additionalArguments: [`--layout-scenario=${scenario.id}`] } })
+          win = new BrowserWindow({ width, height, useContentSize: true, show: false, frame: false, transparent: true, resizable: false, webPreferences: { backgroundThrottling: false, preload: preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: false, additionalArguments: [`--layout-scenario=${scenario.id}`] } })
           await win.loadFile(rendererPath, scenario.window === 'admin' ? { hash: 'admin' } : undefined)
           await prepareScenario(win, scenario)
           const metrics = await win.webContents.executeJavaScript(PROBE)
           record.metrics = metrics
           record.diagnostics = diagnostics(metrics, scenario, rendererSourceMatches)
           record.passed = Object.values(record.diagnostics).every(Boolean)
+          // DOM state can precede the compositor frame, especially in hidden windows.
+          // Reset probe scrolling and wait for paint before capturing the named scenario.
+          await win.webContents.executeJavaScript(`new Promise((resolve) => {
+            document.querySelectorAll('[data-phone-content], .ppt-admin-scroll, .ppt-scroll-stack').forEach((element) => { element.scrollTop = 0; });
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+          })`)
           const screenshotName = `${scenario.id}-${width}x${height}.png`
           await writeFile(join(reportDir, screenshotName), (await win.webContents.capturePage()).toPNG())
           record.screenshot = screenshotName
