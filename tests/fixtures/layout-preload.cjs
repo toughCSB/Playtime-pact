@@ -10,6 +10,15 @@ const listeners = (channel) => (callback) => {
 const fail = (name) => Promise.reject(new Error(`layout fixture: ${name}`))
 const currentHour = new Date().getHours()
 const outsideHours = scenario === 'play-outside-hours'
+const readmeTimerStates = {
+  'readme-timer-green': { remainingSeconds: 1250, mode: 'corner' },
+  'readme-timer-yellow': { remainingSeconds: 290, mode: 'corner' },
+  'readme-timer-orange': { remainingSeconds: 170, mode: 'corner' },
+  'readme-timer-red': { remainingSeconds: 50, mode: 'corner' },
+  'readme-timer-warning': { remainingSeconds: 170, mode: 'center-popup' },
+  'readme-timer-countdown': { remainingSeconds: 8, mode: 'center-countdown' },
+}
+const readmeTimerState = readmeTimerStates[scenario]
 const settings = {
   weekdayLimit: scenario === 'settings-validation-error' ? Number.NaN : 60,
   weekendLimit: 90,
@@ -33,11 +42,11 @@ contextBridge.exposeInMainWorld('api', {
   hideMainWindowNow: () => {},
   showMainWindow: async () => {},
   timerGetStatus: async () => ({
-    running: ['admin-action-error', 'play-active-overlay'].includes(scenario),
-    remainingSeconds: ['admin-action-error', 'play-active-overlay'].includes(scenario) ? 1800 : 0,
-    mode: 'corner',
-    activeGameIds: scenario === 'play-active-overlay' ? ['roblox'] : [],
-    primaryGameId: scenario === 'play-active-overlay' ? 'roblox' : undefined,
+    running: Boolean(readmeTimerState) || ['admin-action-error', 'play-active-overlay'].includes(scenario),
+    remainingSeconds: readmeTimerState?.remainingSeconds ?? (['admin-action-error', 'play-active-overlay'].includes(scenario) ? 1800 : 0),
+    mode: readmeTimerState?.mode ?? 'corner',
+    activeGameIds: readmeTimerState ? ['minecraft'] : scenario === 'play-active-overlay' ? ['roblox'] : [],
+    primaryGameId: readmeTimerState ? 'minecraft' : scenario === 'play-active-overlay' ? 'roblox' : undefined,
   }),
   timerAdjustTime: async (minutes) => scenario === 'admin-action-error' ? fail('timerAdjustTime') : ({ remainingSeconds: Math.max(0, 1800 + minutes * 60) }),
   timerAdminStop: async () => scenario === 'admin-action-error' ? fail('timerAdminStop') : undefined,

@@ -81,21 +81,21 @@ Badlion, Feather, Prism Launcher 등 여러 Minecraft 실행 환경을 식별하
 
 ### 🕹️ 타이머 오버레이 — 시간대별 색상
 
-| 초록 (5분 초과) | 노랑 (5분 이하) |
+| 초록 · 20:50 (5분 초과) | 노랑 · 04:50 (3분 초과~5분 이하) |
 |:-:|:-:|
-| <img src="screenshots/timer-green.png" alt="남은 시간이 5분을 초과한 초록색 타이머" width="430"> | <img src="screenshots/timer-yellow.png" alt="남은 시간이 5분 이하인 노란색 타이머" width="430"> |
+| <img src="screenshots/timer-green.png" alt="20분 50초가 남아 초록색으로 표시된 Minecraft 타이머" width="336"> | <img src="screenshots/timer-yellow.png" alt="4분 50초가 남아 노란색으로 표시된 Minecraft 타이머" width="336"> |
 
-| 주황 (3분 이하) | 빨강 (1분 이하) |
+| 주황 · 02:50 (1분 초과~3분 이하) | 빨강 · 00:50 (1분 이하) |
 |:-:|:-:|
-| <img src="screenshots/timer-orange.png" alt="남은 시간이 3분 이하인 주황색 타이머" width="430"> | <img src="screenshots/timer-red.png" alt="남은 시간이 1분 이하인 빨간색 타이머" width="430"> |
+| <img src="screenshots/timer-orange.png" alt="2분 50초가 남아 주황색으로 표시된 Minecraft 타이머" width="336"> | <img src="screenshots/timer-red.png" alt="50초가 남아 빨간색으로 표시된 Minecraft 타이머" width="336"> |
 
-> 게임 화면을 덜 가리는 작은 오버레이 · DSEG7 전자시계 폰트 · 종료 시간이 가까워질수록 색상 변경
+> 실제 타이머 카드만 잘라낸 화면 · DSEG7 전자시계 폰트 · 초록 `#7bffb5` → 노랑 `#ffe27a` → 주황 `#ffb347` → 빨강 `#ff5d6c`
 
 ### ⚠️ 경고 팝업 + 카운트다운
 
 | 단계별 경고 | 최종 카운트다운 (10초) |
 |:-:|:-:|
-| <img src="screenshots/timer-warning.png" alt="게임 종료 전 중앙 경고 화면" width="430"> | <img src="screenshots/timer-countdown.png" alt="게임 종료 전 마지막 카운트다운 화면" width="430"> |
+| <img src="screenshots/timer-warning.png" alt="3분 경고와 주황색 2분 50초 타이머" width="430"> | <img src="screenshots/timer-countdown.png" alt="빨간색 8초 마지막 카운트다운" width="430"> |
 
 > 경고 시 타이머가 화면 중앙으로 이동했다가 코너로 복귀 · 마지막 10초에는 중앙에서 계속 카운트다운
 
@@ -142,10 +142,10 @@ Badlion, Feather, Prism Launcher 등 여러 Minecraft 실행 환경을 식별하
 
 | 남은 시간 | 표시 색상 |
 |---|---|
-| 5분 초과 | 🟢 초록 |
-| 5분 이하 | 🟡 노랑 |
-| 3분 이하 | 🟠 주황 |
-| 1분 이하 | 🔴 빨강 |
+| 5분 초과 | 🟢 초록 `#7bffb5` |
+| 3분 초과 ~ 5분 이하 | 🟡 노랑 `#ffe27a` |
+| 1분 초과 ~ 3분 이하 | 🟠 주황 `#ffb347` |
+| 1분 이하 | 🔴 빨강 `#ff5d6c` |
 
 ### ⚠️ 단계별 경고 팝업
 
@@ -257,6 +257,7 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 | TypeScript | `npm run typecheck` 통과 |
 | Windows 패키징 | x64 NSIS 설치 후보 생성 통과 |
 | UI 레이아웃 | 사용 완료 화면 5개 창 크기 통과, 큰 화면과 최소 화면 직접 확인 |
+| README 화면 | 현재 renderer에서 9장 재생성, 네 색상의 표시 시간·CSS 색상 자동 대조 |
 | Minecraft / Lunar | 실제 실행 관련 감지·타이머·종료 시험 수행 |
 
 ### 아직 확인하지 못한 항목
@@ -358,6 +359,7 @@ npm run dev
 npm run typecheck
 npm test
 npm run build
+npm run screenshots:readme
 ```
 
 ### Windows 배포 빌드

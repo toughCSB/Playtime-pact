@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "screenshots:readme": "electron-vite build && electron scripts/capture-readme-screenshots.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --exclude tests/remoteApprovalBackend.test.mjs --exclude tests/remoteApprovalD1.test.mjs --exclude tests/remoteBackendMigrations.test.mjs --exclude tests/remoteBackendConfig.test.mjs --exclude tests/remoteBackendAuthority.test.mjs --exclude tests/remoteBackendControls.test.mjs --exclude tests/androidUpdateTooling.test.mjs --exclude tests/fcmProvider.test.mjs --exclude tests/remoteApprovalLifecycleE2E.test.mjs && node --test --test-concurrency=1 tests/remoteApprovalBackend.test.mjs tests/remoteApprovalD1.test.mjs tests/remoteBackendMigrations.test.mjs tests/remoteBackendConfig.test.mjs tests/remoteBackendAuthority.test.mjs tests/remoteBackendControls.test.mjs tests/androidUpdateTooling.test.mjs tests/fcmProvider.test.mjs tests/remoteApprovalLifecycleE2E.test.mjs",
     "package:win": "npm run package:win:signed",
