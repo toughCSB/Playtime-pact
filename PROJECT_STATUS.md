@@ -1,5 +1,7 @@
 # Playtime Pact — 현재 상태와 완성 계획
 
+> 이 문서는 2026-08-10의 계획 기록입니다. 2026-09-09 Windows 0.60.8의 기능·검증 상태·남은 제한은 [README](README.md)와 [Windows 설치 안내](WINDOWS_INSTALL.md)를 우선합니다. 저장소는 `toughCSB/Playtime-pact`로 통합했으며, 아래의 원격 미연결 방침은 과거 기록입니다.
+
 > 기준일: 2026-08-10
 
 ## 결론
