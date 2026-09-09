@@ -1,6 +1,6 @@
 {
   "name": "playtime-pact",
-  "version": "0.60.6",
+  "version": "0.60.8",
   "description": "자녀의 게임 플레이 시간을 관리하는 Electron 타이머 앱",
   "main": "out/main/main.js",
   "scripts": {
