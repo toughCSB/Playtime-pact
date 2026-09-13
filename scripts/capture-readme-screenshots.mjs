@@ -15,7 +15,7 @@ const previewName = process.argv.includes('--preview')
 
 const captures = [
   { name: 'main-screen', scenario: 'play-ready', width: 420, height: 760, marker: '[data-surface="play"] [data-phone-shell]' },
-  { name: 'settings-screen', scenario: 'settings-loaded', width: 420, height: 760, marker: '[data-surface="settings"] [data-phone-shell]', action: 'settings' },
+  { name: 'settings-screen', scenario: 'settings-loaded', width: 420, height: 760, marker: '[data-surface="admin-settings"] [data-phone-shell]', action: 'settings' },
   { name: 'admin-screen', scenario: 'admin-timer', width: 400, height: 720, marker: '.ppt-admin-shell[data-admin-destination="timer"]', hash: 'admin', action: 'admin' },
   { name: 'timer-green', scenario: 'readme-timer-green', width: 360, height: 151, marker: '.ppt-corner-timer__panel', crop: true, expectedText: '20:50', expectedColor: 'rgb(123, 255, 181)' },
   { name: 'timer-yellow', scenario: 'readme-timer-yellow', width: 360, height: 151, marker: '.ppt-corner-timer__panel', crop: true, expectedText: '04:50', expectedColor: 'rgb(255, 226, 122)' },
@@ -68,15 +68,16 @@ const prepare = async (win, capture) => {
       : capture.marker
   await waitFor(win, initialMarker)
   if (capture.action === 'settings') {
-    await clickByName(win, '[data-phone-nav] button', 'Settings')
+    await clickByName(win, '[data-phone-nav] button', '부모님 관리')
     await waitFor(win, '[role="dialog"][aria-modal="true"] .ppt-pinpad')
     await enterPin(win)
     await waitFor(win, capture.marker)
   }
   if (capture.action === 'admin') {
     await enterPin(win)
+    await waitFor(win, '[data-phone-nav] button')
+    await clickByName(win, '[data-phone-nav] button', '오늘 시간')
     await waitFor(win, capture.marker)
-    await clickByName(win, '[data-phone-nav] button', 'Timer')
   }
   if (capture.warning) {
     win.webContents.send('timer:warning', { minutesLeft: capture.warning })
@@ -92,7 +93,9 @@ const inspect = async (win, capture) => win.webContents.executeJavaScript(`(() =
   const target = document.querySelector(${JSON.stringify(capture.marker)})
   const timer = target?.querySelector('.ppt-corner-timer__time, .ppt-overlay-card__timer')
   const rect = target?.getBoundingClientRect()
+  const drag = target?.querySelector('.ppt-parent-toolbar, .ppt-topbar')
   return {
+    dragRegion: drag ? getComputedStyle(drag).webkitAppRegion : null,
     text: timer?.textContent?.trim() ?? null,
     color: timer ? getComputedStyle(timer).color : null,
     markerRect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import React from 'react'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/renderer/src/App'
@@ -10,6 +10,7 @@ import AdminPanel from '../src/renderer/src/pages/AdminPanel'
 type Listener = (payload?: any) => void
 
 const listenerNames = [
+  'onSettingsChanged',
   'onTimerTick',
   'onTimerWarning',
   'onTimerExpired',
@@ -49,6 +50,8 @@ function createApi() {
     timerAdminStop: vi.fn(async () => {}),
     adminVerifyPassword: vi.fn(async () => true),
     adminUnlockSettings: vi.fn(async () => true),
+    adminIsUnlocked: vi.fn(async () => false),
+    adminLock: vi.fn(async () => {}),
     adminApproveNextSession: vi.fn(async () => ({ ok: true, launchedPendingGame: false })),
     remoteGetState: vi.fn(async () => ({
       lifecycle: 'offline',
@@ -94,12 +97,70 @@ afterEach(() => {
 })
 
 describe('renderer interactions', () => {
+  it('refreshes the main quota immediately when saved policy is broadcast', async () => {
+    const { api, listeners } = createApi()
+    window.api = api as Window['api']
+    render(<App />)
+    await screen.findByRole('button', { name: '메인' })
+    const policy = { ...(await api.readSettings()), weekdayLimit: 120, weekendLimit: 120 }
+    await act(async () => listeners.get('onSettingsChanged')?.(policy))
+    expect(document.querySelector('.ppt-status-strip')?.textContent).toContain('총 240분')
+  })
+
+  it('saves zero sessions for rest days and rejects negative counts', async () => {
+    const { api } = createApi()
+    api.adminIsUnlocked.mockResolvedValue(true)
+    window.api = api as Window['api']
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
+    const counts = await screen.findAllByLabelText('하루 횟수')
+    for (const input of counts) { await user.clear(input); await user.type(input, '0') }
+    await user.click(screen.getByRole('button', { name: '게임 규칙 저장' }))
+    await waitFor(() => expect(api.writeSettings).toHaveBeenCalledWith(expect.objectContaining({ weekdaySessionCount: 0, weekendSessionCount: 0 })))
+    fireEvent.change(counts[0], { target: { value: '-1' } })
+    await user.click(screen.getByRole('button', { name: '게임 규칙 저장' }))
+    expect(api.writeSettings).toHaveBeenCalledOnce()
+    expect(document.querySelector('[data-settings-error="validation"]')).not.toBeNull()
+  })
+
+  it('allows PC PIN approval while the remote service is online', async () => {
+    const { api } = createApi()
+    api.readSettings.mockResolvedValue({ ...(await api.readSettings()), requireApprovalBeforeStart: true })
+    api.remoteGetState.mockResolvedValue({ lifecycle: 'online', health: 'online', updatedAt: Date.now(), serverTime: Date.now() })
+    api.adminApproveNextSession.mockResolvedValue({ ok: true, preauthorizedNextLaunch: true, launchedPendingGame: false })
+    window.api = api as Window['api']
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: '부모 PIN으로 시작 승인' }))
+    for (const digit of ['1','2','3','4']) await user.click(screen.getByRole('button', { name: digit }))
+    await waitFor(() => expect(api.adminApproveNextSession).toHaveBeenCalledOnce())
+    expect(await screen.findByText(/승인 완료! 5분 안에/)).toBeTruthy()
+  })
+
+  it('opens quick time directly, reuses a live parent session, and locks explicitly', async () => {
+    const { api } = createApi()
+    api.adminIsUnlocked.mockResolvedValue(true)
+    window.api = api as Window['api']
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: '＋ 오늘 시간 추가' }))
+    await user.click(await screen.findByRole('button', { name: '+15분' }))
+    expect(api.timerAdjustTime).toHaveBeenCalledWith(15)
+    expect(api.adminUnlockSettings).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: '기본 규칙' }))
+    await screen.findByRole('button', { name: '게임 규칙 저장' })
+    await user.click(screen.getByRole('button', { name: '잠금' }))
+    expect(api.adminLock).toHaveBeenCalledOnce()
+    expect(await screen.findByLabelText('부모님 4자리 PIN')).toBeTruthy()
+  })
+
   it('dismisses the settings PIN dialog when a live game activates the compact timer', async () => {
     const { api, listeners } = createApi()
     window.api = api as Window['api']
     const user = userEvent.setup()
     render(<App />)
-    await user.click(await screen.findByRole('button', { name: 'Settings' }))
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
     expect(screen.getByRole('dialog', { name: 'PIN을 눌러주세요' })).toBeTruthy()
     act(() => listeners.get('onTimerTick')?.({ remainingSeconds: 90 }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'PIN을 눌러주세요' })).toBeNull())
@@ -113,16 +174,17 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
     expect(screen.queryByRole('button', { name: '+15분' })).toBeNull()
-    await user.click(await screen.findByRole('button', { name: 'Settings' }))
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
     for (const digit of ['1', '2', '3', '4']) await user.click(screen.getByRole('button', { name: digit }))
-    const mobile = await screen.findByRole('checkbox', { name: /모바일 부모님 승인 사용/ })
+    const mobile = await screen.findByRole('checkbox', { name: /게임 시작 전 부모님 승인 받기/ })
     expect((mobile as HTMLInputElement).checked).toBe(false)
     expect(screen.queryByRole('button', { name: '부모님 기기 연결 QR/주소 만들기' })).toBeNull()
-    await user.click(screen.getByRole('button', { name: '+15분' }))
-    await waitFor(() => expect(api.timerAdjustTime).toHaveBeenCalledWith(15))
-    expect(await screen.findByText(/15분을 추가했어요/)).toBeTruthy()
     await user.click(mobile)
+    await user.click(await screen.findByText('모바일 연결 (선택)'))
     expect(await screen.findByRole('button', { name: '부모님 기기 연결 QR/주소 만들기' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '오늘 시간' }))
+    await user.click(await screen.findByRole('button', { name: '+15분' }))
+    await waitFor(() => expect(api.timerAdjustTime).toHaveBeenCalledWith(15))
   })
 
   it('refreshes remaining time when returning from settings after a parent credit', async () => {
@@ -133,11 +195,12 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
     expect(await screen.findByText('금일 약속된 게임 타임이 종료되었습니다.')).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    await user.click(screen.getByRole('button', { name: '부모님 관리' }))
     for (const digit of ['1', '2', '3', '4']) await user.click(screen.getByRole('button', { name: digit }))
+    await user.click(await screen.findByRole('button', { name: '오늘 시간' }))
     await screen.findByRole('button', { name: '+15분' })
     api.dailyGetRemaining.mockResolvedValue({ ...usage, remainingSeconds: 900, exhausted: false })
-    await user.click(screen.getByRole('button', { name: '메인 화면으로 돌아가기' }))
+    await user.click(screen.getByRole('button', { name: '← 메인' }))
     expect(await screen.findByText('15:00')).toBeTruthy()
     expect(screen.queryByText('금일 약속된 게임 타임이 종료되었습니다.')).toBeNull()
   })
@@ -148,7 +211,7 @@ describe('renderer interactions', () => {
     window.api = api as Window['api']
     const user = userEvent.setup()
     render(<App />)
-    await user.click(await screen.findByRole('button', { name: 'Settings' }))
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
     expect(screen.getByRole('dialog')).toBeTruthy()
     await act(async () => listeners.get('onSupportedGameBlocked')?.({ gameId: 'minecraft', reason: 'daily-exhausted', message: '금일 약속된 게임 타임이 종료되었습니다.' }))
     expect(screen.queryByRole('dialog')).toBeNull()
@@ -167,11 +230,11 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    const rules = await screen.findByRole('button', { name: 'Rules' })
+    const rules = await screen.findByRole('button', { name: '오늘 규칙' })
     await user.click(rules)
     expect(rules.getAttribute('aria-current')).toBe('page')
 
-    const settingsButton = screen.getByRole('button', { name: 'Settings' })
+    const settingsButton = screen.getByRole('button', { name: '부모님 관리' })
     await user.click(settingsButton)
     expect(screen.getByRole('dialog', { name: 'PIN을 눌러주세요' })).toBeTruthy()
     for (const digit of ['1', '2', '3', '4']) {
@@ -181,8 +244,8 @@ describe('renderer interactions', () => {
     expect(await screen.findByRole('heading', { name: '우리 집 게임 규칙' })).toBeTruthy()
     expect(api.adminUnlockSettings).toHaveBeenCalledWith('1234')
     await waitFor(() => {
-      const settingsSurface = document.querySelector('[data-surface="settings"]')
-      expect(document.activeElement?.contains(settingsSurface)).toBe(true)
+      const settingsSurface = document.querySelector('[data-surface="admin-settings"]')
+      expect(document.activeElement?.contains(settingsSurface) || settingsSurface?.contains(document.activeElement)).toBe(true)
       expect(document.activeElement).not.toBe(settingsButton)
     })
   })
@@ -194,7 +257,7 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: 'Settings' }))
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
     for (const digit of ['1', '2', '3', '4']) await user.click(screen.getByRole('button', { name: digit }))
     await user.click(await screen.findByRole('button', { name: '게임 규칙 저장' }))
 
@@ -208,7 +271,7 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: 'Settings' }))
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
     for (const digit of ['1', '2', '3', '4']) await user.click(screen.getByRole('button', { name: digit }))
     const startHour = await screen.findByLabelText('시작 가능 시각')
     const endHour = screen.getByLabelText('종료 시각')
@@ -242,7 +305,7 @@ describe('renderer interactions', () => {
       api.timerGetStatus.mockRejectedValue(new Error('unavailable'))
       window.api = api as Window['api']
       const user = userEvent.setup()
-      render(<AdminPanel />)
+      render(<AdminPanel initialDestination="timer" />)
       for (const digit of ['1', '2', '3', '4']) await user.click(await screen.findByRole('button', { name: digit }))
       expect(await screen.findByText('타이머 상태를 불러오지 못했어요.')).toBeTruthy()
       expect(screen.getByText('상태 확인 불가')).toBeTruthy()
@@ -264,7 +327,7 @@ describe('renderer interactions', () => {
     api.timerAdjustTime.mockImplementation(() => new Promise((resolve) => { completeAdjustment = resolve }))
     window.api = api as Window['api']
     const user = userEvent.setup()
-    render(<AdminPanel />)
+    render(<AdminPanel initialDestination="timer" />)
     for (const digit of ['1', '2', '3', '4']) await user.click(await screen.findByRole('button', { name: digit }))
     await user.dblClick(await screen.findByRole('button', { name: '+5분' }))
     expect(api.timerAdjustTime).toHaveBeenCalledTimes(1)
@@ -283,10 +346,10 @@ describe('renderer interactions', () => {
     api.timerAdminStop.mockRejectedValue(new Error('termination failed'))
     window.api = api as Window['api']
     const user = userEvent.setup()
-    render(<AdminPanel />)
+    render(<AdminPanel initialDestination="timer" />)
 
     for (const digit of ['1', '2', '3', '4']) await user.click(await screen.findByRole('button', { name: digit }))
-    await user.click(await screen.findByRole('button', { name: 'Timer' }))
+    await user.click(await screen.findByRole('button', { name: '오늘 시간' }))
     await user.click(await screen.findByRole('button', { name: '타이머 중지' }))
 
     expect(await screen.findByText('타이머 중지에 실패했어요.')).toBeTruthy()
@@ -298,7 +361,7 @@ describe('renderer interactions', () => {
     const { api, listeners } = createApi()
     window.api = api as Window['api']
     render(<App />)
-    await screen.findByRole('button', { name: 'Play' })
+    await screen.findByRole('button', { name: '메인' })
 
     listeners.get('onSupportedGameBlocked')?.({
       gameId: 'roblox',
@@ -324,7 +387,7 @@ describe('renderer interactions', () => {
     const { api, disposers } = createApi()
     window.api = api as Window['api']
     const view = render(<App />)
-    await screen.findByRole('button', { name: 'Play' })
+    await screen.findByRole('button', { name: '메인' })
 
     view.unmount()
     for (const name of listenerNames) {
@@ -337,13 +400,13 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    const settings = await screen.findByRole('button', { name: 'Settings' })
+    const settings = await screen.findByRole('button', { name: '부모님 관리' })
     await user.click(settings)
     const dialog = screen.getByRole('dialog', { name: 'PIN을 눌러주세요' })
     const input = screen.getByLabelText('부모님 4자리 PIN')
     await waitFor(() => expect(document.activeElement).toBe(input))
     expect(document.querySelector('.ppt-app-root > div')?.hasAttribute('inert')).toBe(true)
-    expect(screen.queryByRole('button', { name: 'Rules' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '오늘 규칙' })).toBeNull()
 
     await user.tab({ shift: true })
     expect(document.activeElement).toBe(dialog.querySelector('.ppt-text-button'))
@@ -360,7 +423,7 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(await screen.findByRole('button', { name: 'Settings' }))
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
     for (const digit of ['1', '2', '3', '4']) await user.click(screen.getByRole('button', { name: digit }))
     const trigger = await screen.findByRole('button', { name: '앱과 워치독 종료' })
     await user.click(trigger)
@@ -383,12 +446,12 @@ describe('renderer interactions', () => {
     const user = userEvent.setup()
     render(<App />)
 
-    const start = await screen.findByRole('button', { name: '부모님 승인하고 시작' })
+    const start = await screen.findByRole('button', { name: '부모 PIN으로 시작 승인' })
     await user.click(start)
     const dialog = screen.getByRole('dialog', { name: 'PIN을 눌러주세요' })
     const input = screen.getByLabelText('부모님 4자리 PIN')
     await waitFor(() => expect(document.activeElement).toBe(input))
-    expect(screen.queryByRole('button', { name: 'Rules' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '오늘 규칙' })).toBeNull()
 
     await user.tab({ shift: true })
     expect(document.activeElement).toBe(dialog.querySelector('.ppt-text-button'))
@@ -403,7 +466,7 @@ describe('renderer interactions', () => {
     const { api, listeners } = createApi()
     window.api = api as Window['api']
     render(<App />)
-    await screen.findByRole('button', { name: 'Play' })
+    await screen.findByRole('button', { name: '메인' })
 
     listeners.get('onSupportedGameBlocked')?.({ message: '지금은 플레이 시간이 아니에요.', reason: 'outside-hours' })
     expect(await screen.findByText('지금은 플레이 시간이 아니에요.')).toBeTruthy()

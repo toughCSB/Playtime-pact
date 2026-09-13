@@ -40,7 +40,7 @@ const validProtectedLocalPolicy = (value: unknown): value is ProtectedLocalPolic
   return Number.isSafeInteger(policy.version) && policy.version! > 0
     && typeof policy.ianaTimeZone === 'string' && /^[A-Za-z0-9_+./-]{1,128}$/.test(policy.ianaTimeZone)
     && [policy.weekdayLimit, policy.weekendLimit].every((entry) => Number.isSafeInteger(entry) && entry! > 0 && entry! <= 1440)
-    && [policy.weekdaySessionCount, policy.weekendSessionCount].every((entry) => Number.isSafeInteger(entry) && entry! > 0 && entry! <= 48)
+    && [policy.weekdaySessionCount, policy.weekendSessionCount].every((entry) => Number.isSafeInteger(entry) && entry! >= 0 && entry! <= 48)
     && policy.weekdayLimit! * policy.weekdaySessionCount! <= 1440
     && policy.weekendLimit! * policy.weekendSessionCount! <= 1440
     && Number.isSafeInteger(policy.allowedStartHour) && policy.allowedStartHour! >= 0 && policy.allowedStartHour! <= 23
@@ -688,11 +688,13 @@ export class PrivilegedApprovalService {
     if (!existing && floor && compareFloor(requestedFloor, floor) <= 0) throw new Error('Protected accounting rollback denied')
     const current = existing ?? { totalMs: scope.totalMs, committedMs: 0, reservedMs: 0, version: 0 }
     const effectiveTotalMs = existing ? Math.min(existing.totalMs, scope.totalMs) : scope.totalMs
-    if (effectiveTotalMs < current.committedMs + current.reservedMs) throw new Error('Protected accounting scope conflict')
     if (operation === 'read') {
       this.releaseExpiredReservations()
       return { scopes: { ...this.accounting.scopes, [key]: this.accounting.scopes[key] ?? current } }
     }
+    // Policy reductions (including a rest day) must still allow readiness and usage reads.
+    // New spending remains blocked when the reduced allowance cannot cover prior usage.
+    if (effectiveTotalMs < current.committedMs + current.reservedMs) throw new Error('Protected accounting scope conflict')
     const receipt = String(payload.receipt ?? '')
     const match = operation === 'commit' ? [receipt, receipt, 'commit', undefined] : /^(.+):(reserve|start|debit|reconcile|attempt|outcome|materialized|parent-credit)(-terminal|-started|-not-started)?$/.exec(receipt)
     if (!match || !/^[A-Za-z0-9._:-]{16,256}$/.test(receipt)) throw new Error('Protected accounting receipt invalid')

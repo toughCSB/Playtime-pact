@@ -97,13 +97,26 @@
     MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service could not be started."
     Abort
   ${EndIf}
-  nsExec::ExecToStack '"$INSTDIR\Playtime Pact.exe" --protection-readiness-check'
-  Pop $R5
-  Pop $R4
+  ; Cold Electron/service startup may outlast the first named-pipe connection.
+  ; Retry readiness, not authentication, and retain the diagnostic if it fails.
+  StrCpy $R6 0
+  ppt_readiness_retry:
+    nsExec::ExecToStack /TIMEOUT=30000 '"$INSTDIR\Playtime Pact.exe" --protection-readiness-check'
+    Pop $R5
+    Pop $R4
+    IntOp $R6 $R6 + 1
+    ${If} $R5 != 0
+    ${AndIf} $R6 < 5
+      Sleep 1500
+      Goto ppt_readiness_retry
+    ${EndIf}
   ${If} $R5 != 0
-    ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop'
-    ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" uninstall'
-    MessageBox MB_OK|MB_ICONSTOP "The protected Playtime Pact service failed its IPC health check."
+    FileOpen $R1 "C:\ProgramData\PlaytimePact\install-health.log" w
+    FileWrite $R1 'Readiness exit: $R5$\r$\n$R4$\r$\n'
+    FileClose $R1
+    ; Keep the service registered: its first start may still be completing.
+    ; A later repair/uninstall must not be stranded by a missing service.
+    MessageBox MB_OK|MB_ICONSTOP "Playtime Pact protection is not ready. Installation is not complete.$\r$\nDiagnostic: $R4$\r$\nSaved to C:\ProgramData\PlaytimePact\install-health.log. Restart Windows and retry this installer."
     Abort
   ${EndIf}
 !macroend
@@ -152,7 +165,15 @@
   FileOpen $R1 "C:\ProgramData\PlaytimePact\watchdog-disabled.flag" w
   FileWrite $R1 'uninstall'
   FileClose $R1
-  ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop' $R3
+  nsExec::ExecToStack 'sc.exe query PlaytimePactPrivilegedBroker'
+  Pop $R3
+  Pop $R4
+  ${If} $R3 == 1060
+    ; Repair of a previous failed installation whose service was rolled back.
+    StrCpy $R3 0
+  ${Else}
+    ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop' $R3
+  ${EndIf}
   ${If} $R3 != 0
     Delete "C:\ProgramData\PlaytimePact\watchdog-disabled.flag"
     IfFileExists "$PLUGINSDIR\previous-watchdog-disabled.flag" 0 +2
@@ -196,6 +217,9 @@
   ; The wrapper is now in staging. sc deletes only this verified service entry;
   ; existing protected policy/usage/PIN data and selectors are never removed.
   ExecWait 'sc.exe delete PlaytimePactPrivilegedBroker' $R3
+  ${If} $R3 == 1060
+    StrCpy $R3 0
+  ${EndIf}
   ${If} $R3 != 0
     Push ""
     Call un.restoreFiles

@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import Timer from './pages/Timer'
-import Settings from './pages/Settings'
 import AdminPanel from './pages/AdminPanel'
 import { attemptSettingsUnlock } from './asyncAttempts'
 import PinPad from './components/PinPad'
-import SmartphoneShell, { useModalFocusBoundary } from './components/SmartphoneShell'
-import PhoneBottomNav from './components/PhoneBottomNav'
+import { useModalFocusBoundary } from './components/SmartphoneShell'
 
 type Page = 'timer' | 'settings'
 
@@ -43,6 +41,7 @@ function SettingsUnlockDialog({ pin, error, submitting, onChange, onSubmit, onCa
 }
 
 export default function App() {
+  const [adminDestination, setAdminDestination] = useState<'timer' | 'settings'>('settings')
   const [page, setPage] = useState<Page>('timer')
   const [settingsPinOpen, setSettingsPinOpen] = useState(false)
   const [settingsPin, setSettingsPin] = useState('')
@@ -109,6 +108,14 @@ export default function App() {
     setPage('timer')
   }
 
+  const openParent = async (destination: 'timer' | 'settings') => {
+    setAdminDestination(destination)
+    if (await window.api?.adminIsUnlocked?.().catch(() => false)) { setPage('settings'); return }
+    settingsTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setSettingsPinError('')
+    setSettingsPinOpen(true)
+  }
+
   return (
     <div ref={appBackgroundRef} className="ppt-app-root">
       <div hidden={page !== 'timer'}>
@@ -116,39 +123,18 @@ export default function App() {
           visible={page === 'timer'}
           requestedSurface={timerDestination}
           onActiveChange={(active) => {
-            if (active) {
+            if (active && page !== 'settings') {
               closeSettingsPin()
               setTimerDestination('play')
               setPage('timer')
             }
           }}
-          onOpenSettings={() => {
-            settingsTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-            setSettingsPinError('')
-            setSettingsPinOpen(true)
-          }}
+          onOpenSettings={() => void openParent('settings')}
+          onAddTime={() => void openParent('timer')}
         />
       </div>
       <div ref={settingsSurfaceRef} hidden={page !== 'settings'} tabIndex={-1}>
-        <SmartphoneShell
-          surface="settings"
-          title="부모님 설정"
-          nav={(
-            <PhoneBottomNav
-              current="settings"
-              items={[
-                { id: 'play', label: 'Play', icon: '▶' },
-                { id: 'rules', label: 'Rules', icon: '✓' },
-                { id: 'settings', label: 'Settings', icon: '⚙' },
-              ]}
-              onSelect={(id) => {
-                if (id === 'play' || id === 'rules') openTimerDestination(id)
-              }}
-            />
-          )}
-        >
-          <Settings onBack={() => openTimerDestination('play')} />
-        </SmartphoneShell>
+        {page === 'settings' ? <AdminPanel authenticated initialDestination={adminDestination} onBack={() => openTimerDestination('play')} /> : null}
       </div>
 
       {settingsPinOpen ? (

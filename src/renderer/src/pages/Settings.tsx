@@ -35,10 +35,6 @@ export default function SettingsPage({ onBack }: Props) {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
-  const [timeAdding, setTimeAdding] = useState(false)
-  const timeAddingRef = useRef(false)
-  const [timeMessage, setTimeMessage] = useState('')
-  const [timeError, setTimeError] = useState(false)
   const [shutdownConfirmOpen, setShutdownConfirmOpen] = useState(false)
   const [remoteHealth, setRemoteHealth] = useState<RemoteApprovalHealth | null>(null)
   const [pairing, setPairing] = useState<(PairingSession & { uri: string }) | null>(null)
@@ -168,12 +164,13 @@ export default function SettingsPage({ onBack }: Props) {
   const settingsAreValid = [
     [settings.weekdayLimit, 5, 240],
     [settings.weekendLimit, 5, 480],
-    [settings.weekdaySessionCount ?? 1, 1, 10],
-    [settings.weekendSessionCount ?? 1, 1, 10],
+    [settings.weekdaySessionCount ?? 1, 0, 10],
+    [settings.weekendSessionCount ?? 1, 0, 10],
     [settings.allowedStartHour, 0, 23],
     [settings.allowedEndHour, 0, 24],
   ].every(([value, minimum, maximum]) => Number.isInteger(value) && value >= minimum && value <= maximum)
     && settings.allowedStartHour !== settings.allowedEndHour
+    && weekdayTotal <= 1440 && weekendTotal <= 1440
 
   const handleSave = async () => {
     if (saving) return
@@ -197,7 +194,7 @@ export default function SettingsPage({ onBack }: Props) {
       setTimeout(() => setSaved(false), 2000)
     } catch {
       setSaved(false)
-      setError('저장에 실패했어요. 설치 후 C:\\ProgramData\\PlaytimePact 권한을 확인해주세요.')
+      setError('저장하지 못했어요. 부모님 인증이 만료되었다면 다시 인증한 뒤 저장해주세요.')
       setTimeout(() => setError(''), 3000)
     } finally {
       setSaving(false)
@@ -216,24 +213,6 @@ export default function SettingsPage({ onBack }: Props) {
       setError('앱 종료에 실패했어요. 관리자 PIN 인증 후 다시 시도해주세요.')
       setTimeout(() => setError(''), 3000)
     }
-  }
-
-  const addParentTime = async (minutes: number) => {
-    if (timeAddingRef.current) return
-    timeAddingRef.current = true
-    setTimeAdding(true)
-    setTimeMessage('시간을 추가하고 있어요...')
-    setTimeError(false)
-    try {
-      if (!window.api) throw new Error('Admin service unavailable')
-      const result = await window.api.timerAdjustTime(minutes)
-      setTimeMessage(`${minutes}분을 추가했어요. 남은 시간은 ${Math.ceil(result.remainingSeconds / 60)}분이에요. 게임을 켜면 사용할 수 있어요.`)
-    } catch (error) {
-      setTimeError(true)
-      setTimeMessage(String(error).includes('Start a game before')
-        ? '게임 실행 중이거나 오늘 기본 시간을 모두 사용한 뒤 추가할 수 있어요.'
-        : '시간을 추가하지 못했어요. 부모님 PIN으로 다시 들어온 뒤 시도해주세요.')
-    } finally { timeAddingRef.current = false; setTimeAdding(false) }
   }
 
   return (
@@ -264,15 +243,15 @@ export default function SettingsPage({ onBack }: Props) {
 
       <section className="ppt-adventure-hero ppt-adventure-hero--settings no-drag">
         <div className="ppt-adventure-hero__copy">
-          <p className="ppt-page-heading__eyebrow">부모님 퀘스트 설정</p>
+          <p className="ppt-page-heading__eyebrow">기본 설정</p>
           <h1 className="ppt-adventure-hero__title">우리 집 게임 규칙</h1>
-          <p className="ppt-adventure-hero__body">시간과 시작 조건을 쉽고 안전하게 정해요.</p>
+          <p className="ppt-adventure-hero__body">평일·주말 규칙을 정해요. 오늘만 줄 시간은 아래 ‘오늘 시간’에서 추가해요.</p>
         </div>
         <VoxelCrew variant="settings" />
       </section>
 
       <div className="ppt-scroll-stack no-drag">
-        <SettingsCard title="하루 허용 시간" subtitle="세션당 분 × 하루 횟수">
+        <SettingsCard title="하루 허용 시간" subtitle="1회 시간 × 하루 횟수 · 0회는 쉬는 날">
           <div className="ppt-grid-2">
             <div className="ppt-stat-card">
               <div className="ppt-stat-card__head">
@@ -296,7 +275,7 @@ export default function SettingsPage({ onBack }: Props) {
                   <span className="ppt-field-label">하루 횟수</span>
                   <input
                     type="number"
-                    min={1}
+                    min={0}
                     max={10}
                     value={settings.weekdaySessionCount ?? 1}
                     onChange={(event) => setSettings((current) => ({ ...current, weekdaySessionCount: Number(event.target.value) }))}
@@ -327,7 +306,7 @@ export default function SettingsPage({ onBack }: Props) {
                   <span className="ppt-field-label">하루 횟수</span>
                   <input
                     type="number"
-                    min={1}
+                    min={0}
                     max={10}
                     value={settings.weekendSessionCount ?? 1}
                     onChange={(event) => setSettings((current) => ({ ...current, weekendSessionCount: Number(event.target.value) }))}
@@ -367,22 +346,12 @@ export default function SettingsPage({ onBack }: Props) {
           <p className="ppt-helper-text">{settings.allowedStartHour}시부터 {settings.allowedEndHour}시까지 게임 시작을 허용해요.</p>
         </SettingsCard>
 
-        <SettingsCard title="오늘 추가 시간" subtitle="부모님 PIN 승인으로 즉시 적용">
-          <p className="ppt-helper-text">게임 실행 중이거나 오늘 기본 시간을 모두 쓴 뒤 시간을 더 줄 수 있어요. 허용 종료 시각은 그대로 지켜요.</p>
-          <div className="ppt-chip-grid">
-            {[5, 15, 30].map((minutes) => <button key={minutes} type="button" className="ppt-chip ppt-chip--positive" disabled={timeAdding} onClick={() => void addParentTime(minutes)}>+{minutes}분</button>)}
-          </div>
-          <div className="ppt-status-slot" role="status" aria-live="polite">
-            {timeMessage ? <p className={`ppt-inline-message ${timeError ? 'ppt-inline-message--danger' : 'ppt-inline-message--success'}`}>{timeMessage}</p> : null}
-          </div>
-        </SettingsCard>
-
         <SettingsCard title="시작 승인 방식" subtitle="모바일 연동은 선택 사항">
           <label className="ppt-toggle-card">
             <div>
-              <strong>모바일 부모님 승인 사용</strong>
+              <strong>게임 시작 전 부모님 승인 받기</strong>
               <p>
-                해제하면 정해진 시간에는 바로 플레이해요. 설정 변경과 추가 시간은 이 PC에서 부모님 PIN으로 승인해요. 켜면 새 게임 타임마다 연결된 모바일의 승인을 받아요.
+                켜면 이 PC에서 부모님 PIN을 입력하거나 연결된 모바일에서 승인할 수 있어요. 해제하면 정해진 시간 안에서 바로 플레이해요.
               </p>
             </div>
             <span className={`ppt-toggle${settings.requireApprovalBeforeStart ? ' is-on' : ''}`} aria-hidden="true">
@@ -396,7 +365,7 @@ export default function SettingsPage({ onBack }: Props) {
             />
           </label>
         </SettingsCard>
-        {settings.requireApprovalBeforeStart && <SettingsCard title="원격 부모님 승인" subtitle={remoteStatus === 'loading' ? '상태 확인 중' : remoteStatus === 'error' ? '상태 확인 실패' : `서비스 ${remoteHealth?.lifecycle ?? '알 수 없음'}`}>
+        {settings.requireApprovalBeforeStart && <details className="ppt-remote-disclosure"><summary>모바일 연결 (선택)</summary><SettingsCard title="원격 부모님 승인" subtitle={remoteStatus === 'loading' ? '상태 확인 중' : remoteStatus === 'error' ? '상태 확인 실패' : `서비스 ${remoteHealth?.lifecycle ?? '알 수 없음'}`}>
           <div className="ppt-remote-admin" aria-live="polite">
             {remoteStatus === 'loading' ? <p><strong>상태 확인 중</strong> · 부모님 기기와 서비스 정보를 불러오고 있어요.</p> : null}
             {remoteStatus === 'error' ? <p><strong>상태 확인 실패</strong> · 새로고침 후 다시 시도해주세요.</p> : null}
@@ -419,7 +388,7 @@ export default function SettingsPage({ onBack }: Props) {
             {remoteError ? <p className="ppt-inline-message ppt-inline-message--danger">{remoteError}</p> : null}
             {remoteRefreshWarning ? <p className="ppt-inline-message ppt-inline-message--danger">{remoteRefreshWarning}</p> : null}
           </div>
-        </SettingsCard>}
+        </SettingsCard></details>}
 
         {settings.requireApprovalBeforeStart && <details className="ppt-danger-zone no-drag">
           <summary>원격 승인 복구 · 연결 초기화 또는 가정 삭제</summary>
@@ -449,7 +418,7 @@ export default function SettingsPage({ onBack }: Props) {
         </details>
         <div className="ppt-rules-strip ppt-rules-strip--settings no-drag">
           <span><strong>하나의 규칙</strong>으로 Minecraft + Roblox 동시 관리</span>
-          <span>저장 즉시 다음 게임 세션부터 적용</span>
+          <span>저장하면 메인 표시와 다음 게임 시작에 반영</span>
         </div>
       </div>
 

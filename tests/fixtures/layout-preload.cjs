@@ -31,6 +31,8 @@ const settings = {
   updatedAt: '2026-08-02T00:00:00.000Z',
 }
 
+let unlocked = false
+
 // This bridge intentionally exposes only the renderer's public preload contract.
 contextBridge.exposeInMainWorld('api', {
   readSettings: async () => scenario === 'settings-read-error' ? fail('readSettings') : settings,
@@ -50,8 +52,11 @@ contextBridge.exposeInMainWorld('api', {
   }),
   timerAdjustTime: async (minutes) => scenario === 'admin-action-error' ? fail('timerAdjustTime') : ({ remainingSeconds: Math.max(0, 1800 + minutes * 60) }),
   timerAdminStop: async () => scenario === 'admin-action-error' ? fail('timerAdminStop') : undefined,
-  adminVerifyPassword: async () => scenario !== 'admin-pin',
-  adminUnlockSettings: async () => true,
+  adminVerifyPassword: async () => { unlocked = scenario !== 'admin-pin'; return unlocked },
+  adminUnlockSettings: async () => { unlocked = true; return true },
+  adminIsUnlocked: async () => unlocked,
+  adminLock: async () => { unlocked = false },
+  onSettingsChanged: listeners('settings:changed'),
   adminApproveNextSession: async () => scenario === 'modal-long-korean-error'
     ? fail('adminApproveNextSession')
     : { ok: true, launchedPendingGame: false },
@@ -65,7 +70,7 @@ contextBridge.exposeInMainWorld('api', {
     sessionsCompleted: scenario === 'play-exhausted' ? 2 : 0,
     sessionsPerDay: 2,
     currentSessionActive: false,
-    remainingSeconds: scenario === 'play-exhausted' ? 0 : 7200,
+    remainingSeconds: scenario === 'play-exhausted' ? 0 : (new Date().getDay() % 6 === 0 ? settings.weekendLimit : settings.weekdayLimit) * 60,
     exhausted: scenario === 'play-exhausted',
   }),
   onTimerTick: listeners('timer:tick'),

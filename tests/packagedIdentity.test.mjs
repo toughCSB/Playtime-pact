@@ -132,7 +132,7 @@ describe('packaged Playtime Pact identity surfaces', () => {
     expect(installerScript).toContain('PlaytimePactPrivilegedBroker.exe" install')
     expect(installerScript).toContain(`nsExec::ExecToStack '"$INSTDIR\\Playtime Pact.exe" --protection-readiness-check'`)
     expect(installerScript).not.toContain("nsExec::ExecToStack 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden")
-    expect(installerScript).toContain('failed its IPC health check')
+    expect(installerScript).toContain('install-health.log')
     expect(customInstall).toContain('PlaytimePactPrivilegedBroker.exe" stop')
     expect(customInstall).not.toContain('sc.exe delete PlaytimePactPrivilegedBroker')
     expect(installerScript).not.toContain('sc.exe create PlaytimePactPrivilegedBroker')

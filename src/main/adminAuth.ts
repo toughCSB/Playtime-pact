@@ -14,6 +14,10 @@ export function requireAdminSession(event: IpcMainInvokeEvent, now = Date.now())
   }
 }
 
+export function hasAdminSession(event: IpcMainInvokeEvent, now = Date.now()): boolean {
+  return canUseAdminSession(now, adminSessions.get(event.sender.id))
+}
+
 export function clearAdminSession(webContentsId: number): void {
   adminSessions.delete(webContentsId)
 }

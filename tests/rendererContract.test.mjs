@@ -12,7 +12,7 @@ describe('renderer frontend overhaul contract', () => {
     expect(timer).toContain('ppt-action-zone')
     expect(timer).toContain('ppt-rules-details')
     expect(timer).toContain('게임 타임 시작')
-    expect(timer).toContain('부모님 승인하고 시작')
+    expect(timer).toContain('부모 PIN으로 시작 승인')
     expect(timer).toContain('<PinPad')
     expect(timer).toContain('approvalOpen')
     expect(timer).toContain('VoxelCrew')
@@ -68,7 +68,7 @@ describe('renderer frontend overhaul contract', () => {
   it('keeps admin controls compact with one adjustment grid and labeled PIN management', () => {
     const admin = read('src/renderer/src/pages/AdminPanel.tsx')
 
-    expect(admin).toContain('게임 마스터 룸')
+    expect(admin).toContain('오늘 시간 관리')
     expect(admin).toContain('타이머 상태')
     expect(admin).toContain('빠른 조정')
     expect(admin).toContain('adjustSign')
@@ -119,7 +119,8 @@ describe('renderer frontend overhaul contract', () => {
     expect(main).toContain('PLAYTIME_PACT_QA_OVERLAY')
     expect(admin).toContain("return api.onTimerTick(({ remainingSeconds: next }) => {")
     expect(admin).toContain('setTimerRunning(isTimerTickActive(next))')
-    expect(ipc).toContain('return redactSettings(readSettings())')
+    expect(ipc).toContain('const saved = callbacks.readPublicSettings?.() ?? redactSettings(readSettings())')
+    expect(ipc).toContain("settings:changed")
     expect(preload).toContain('Promise<PublicSettings>')
     expect(settings).toContain('const persistedSettings = await api.writeSettings')
     expect(settings).toContain('setSettings(persistedSettings)')

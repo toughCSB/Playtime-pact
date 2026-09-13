@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import Settings from './Settings'
 import VoxelCrew from '../components/VoxelCrew'
 import PinPad from '../components/PinPad'
 import SmartphoneShell from '../components/SmartphoneShell'
@@ -18,7 +19,7 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
-function PinStage({ onSuccess }: { onSuccess: () => void }) {
+function PinStage({ onSuccess, onBack }: { onSuccess: () => void; onBack?: () => void }) {
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [attempts, setAttempts] = useState(0)
@@ -82,6 +83,7 @@ function PinStage({ onSuccess }: { onSuccess: () => void }) {
   }, [pin, lockoutSeconds, verifying])
 
   const handleClose = async () => {
+    if (onBack) { onBack(); return }
     const closeWindow = window.api?.adminCloseWindow
     if (!closeWindow) {
       setError('창 제어 서비스에 연결할 수 없어요. 앱을 다시 시작해주세요.')
@@ -132,7 +134,7 @@ function PinStage({ onSuccess }: { onSuccess: () => void }) {
   )
 }
 
-function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
+function AdminStage({ destination, onBack }: { destination: 'timer' | 'safety'; onBack?: () => void }) {
   const [timerRunning, setTimerRunning] = useState(false)
   const [remainingSeconds, setRemainingSeconds] = useState(0)
   const [resumeEnabled, setResumeEnabled] = useState(true)
@@ -332,13 +334,6 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
     try {
       const api = window.api
       if (!api) throw new Error('Admin bridge unavailable')
-      const ok = await api.adminVerifyPassword(pwCurrent)
-      if (!ok) {
-        setPwMsg('현재 비밀번호가 틀렸어요')
-        setPwError(true)
-        setTimeout(() => setPwMsg(''), 2500)
-        return
-      }
       await api.adminChangePassword(pwCurrent, pwNew)
       setPwCurrent('')
       setPwNew('')
@@ -356,6 +351,7 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
   }
 
   const handleCloseWindow = async () => {
+    if (onBack) { onBack(); return }
     const closeWindow = window.api?.adminCloseWindow
     if (!closeWindow) {
       setAddMsg('창 제어 서비스에 연결할 수 없어요.')
@@ -369,6 +365,7 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
   }
 
   const handleShowMain = async () => {
+    if (onBack) { onBack(); return }
     const api = window.api
     if (!api) {
       setAddMsg('창 제어 서비스에 연결할 수 없어요.')
@@ -408,8 +405,8 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
         <section className="ppt-admin-hero">
           <div>
             <p className="ppt-card__eyebrow">부모님 전용 컨트롤</p>
-            <h1 className="ppt-card__title">게임 마스터 룸</h1>
-            <p className="ppt-card__body">남은 시간과 안전 설정을 한눈에 관리해요.</p>
+            <h1 className="ppt-card__title">오늘 시간 관리</h1>
+            <p className="ppt-card__body">시간을 추가하거나 차감하고, 실행 중인 게임을 중지해요.</p>
           </div>
           <VoxelCrew variant="admin" />
         </section>
@@ -561,31 +558,37 @@ function AdminStage({ destination }: { destination: 'timer' | 'safety' }) {
   )
 }
 
-export default function AdminPanel() {
-  const [stage, setStage] = useState<Stage>('pin')
-  const [destination, setDestination] = useState<'timer' | 'safety'>('timer')
-
+export default function AdminPanel({ authenticated = false, initialDestination = 'settings', onBack }: {
+  authenticated?: boolean; initialDestination?: 'timer' | 'settings' | 'safety'; onBack?: () => void
+}) {
+  const [stage, setStage] = useState<Stage>(authenticated ? 'admin' : 'pin')
+  const [destination, setDestination] = useState<'timer' | 'settings' | 'safety'>(initialDestination)
+  useEffect(() => {
+    if (stage !== 'admin') return
+    const poll = window.setInterval(() => {
+      void window.api?.adminIsUnlocked?.().then((valid) => { if (!valid) setStage('pin') }).catch(() => setStage('pin'))
+    }, 15_000)
+    return () => window.clearInterval(poll)
+  }, [stage])
+  const back = onBack ?? (() => { void window.api?.showMainWindow(); void window.api?.adminCloseWindow() })
   return (
-    <SmartphoneShell
-      surface={`admin-${destination}`}
-      title="부모님 관리자"
+    <SmartphoneShell surface={`admin-${destination}`} title="부모님 관리자"
       nav={stage === 'admin' ? (
-        <PhoneBottomNav
-          current={destination}
-          items={[
-            { id: 'timer', label: 'Timer', icon: '◷' },
-            { id: 'safety', label: 'Safety', icon: '◇' },
-          ]}
-          onSelect={(id) => setDestination(id as 'timer' | 'safety')}
-        />
-      ) : undefined}
-    >
+        <PhoneBottomNav current={destination} items={[
+          { id: 'settings', label: '기본 규칙', icon: '⚙' },
+          { id: 'timer', label: '오늘 시간', icon: '＋' },
+          { id: 'safety', label: 'PIN·기타', icon: '◇' },
+        ]} onSelect={(id) => setDestination(id as typeof destination)} />
+      ) : undefined}>
       <div className="ppt-admin-root">
-        {stage === 'pin' ? (
-          <PinStage onSuccess={() => setStage('admin')} />
-        ) : (
-          <AdminStage destination={destination} />
-        )}
+        {stage === 'pin' ? <PinStage onSuccess={() => setStage('admin')} onBack={onBack} /> : <>
+          <div className="ppt-parent-toolbar app-drag">
+            <button className="ppt-button ppt-button--ghost ppt-button--small no-drag" onClick={back}>← 메인</button>
+            <span>부모님 인증됨 · 5분 유지</span>
+            <button className="ppt-button ppt-button--ghost ppt-button--small no-drag" onClick={() => { void window.api?.adminLock(); setStage('pin') }}>잠금</button>
+          </div>
+          {destination === 'settings' ? <Settings onBack={back} /> : <AdminStage destination={destination} onBack={back} />}
+        </>}
       </div>
     </SmartphoneShell>
   )

@@ -270,7 +270,7 @@ test('legacy mode refuses a database that is not the recognizable pre-0001 basel
 })
 
 test('the committed schema snapshot has not drifted from the migration chain', () => {
-  assert.equal(readFileSync(schemaPath, 'utf8'), generateSnapshot())
+  assert.equal(readFileSync(schemaPath, 'utf8').replace(/\r\n/g, '\n'), generateSnapshot())
 })
 
 test('invalid mode and stop-after arguments do not mutate an empty database', () => {

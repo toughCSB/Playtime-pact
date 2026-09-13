@@ -82,10 +82,21 @@ input[type='number'] {
 
 .app-drag {
   -webkit-app-region: drag;
+  cursor: move;
 }
 
-.no-drag,
-.no-drag * {
+.ppt-parent-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 4px 8px; flex-shrink: 0; background: #edf7ef; }
+.ppt-parent-toolbar span { font-size: 10px; color: #466853; }
+.ppt-parent-shortcuts { display: grid; gap: 6px; margin: 12px 0; }
+.ppt-parent-shortcuts .ppt-button { min-height: 42px; }
+.ppt-remote-disclosure { padding: 12px; border-radius: 14px; background: #eff7f1; }
+.ppt-remote-disclosure summary { cursor: pointer; font-weight: 700; }
+.ppt-admin-root { display: flex; flex-direction: column; }
+.ppt-admin-root > .ppt-shell--settings, .ppt-admin-root > .ppt-admin-shell { flex: 1; min-height: 0; height: auto; }
+.ppt-admin-root > .ppt-shell--settings .ppt-adventure-hero { display: none; }
+.ppt-admin-root > .ppt-shell--settings .ppt-scroll-stack { padding-top: 8px; }
+
+.no-drag {
   -webkit-app-region: no-drag !important;
 }
 
@@ -2008,3 +2019,17 @@ textarea:focus-visible {
 .ppt-remote-admin > .ppt-button {
   margin-top: 8px;
 }
+
+/* Parent tasks stay above the fold, including on a short laptop display. */
+.ppt-admin-root > .ppt-shell--settings .ppt-topbar,
+.ppt-admin-root > .ppt-admin-shell .ppt-admin-topbar { display: none; }
+.ppt-admin-root .ppt-admin-hero { padding: 10px 12px; min-height: 0; }
+.ppt-admin-root .ppt-admin-hero > .ppt-voxel-scene,
+.ppt-admin-root .ppt-admin-hero .ppt-card__eyebrow { display: none; }
+.ppt-admin-root .ppt-admin-hero .ppt-card__body { font-size: 12px; margin-top: 4px; }
+.ppt-admin-root .ppt-status-slot:empty { display: none; }
+.ppt-admin-root .ppt-display--compact { padding: 10px 12px; gap: 4px; }
+.ppt-admin-root .ppt-display--compact .ppt-display__value { font-size: 36px; line-height: 1.2; }
+.ppt-admin-root .ppt-sticky-actions { padding: 10px 16px; }
+.ppt-admin-root .ppt-card--panel { padding: 14px; }
+.ppt-admin-root .ppt-admin-scroll { gap: 10px; padding-top: 10px; }

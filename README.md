@@ -2,27 +2,26 @@
 
 > **부모와 자녀가 함께 정한 Roblox·Minecraft 게임 시간을 눈에 보이게 만들고, 자녀가 스스로 약속을 지키도록 돕는 Windows 데스크톱 타이머 앱**
 
-[![Version](https://img.shields.io/badge/version-0.60.8-blue)](#-v0608-주요-변경-요약)
+[![Version](https://img.shields.io/badge/version-0.61.0--rc.1-blue)](RELEASE_NOTES_0.61.0.md)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)](#-설치-및-실행)
 [![Games](https://img.shields.io/badge/games-Roblox%20%7C%20Minecraft%20%7C%20Lunar-45b97c)](#-지원-게임)
-[![Tests](https://img.shields.io/badge/tests-423%20passed-brightgreen)](#-검증-상태)
 [![License](https://img.shields.io/badge/license-MIT-green)](#-라이선스)
 
 ---
 
 ## ⚠️ Windows 설치 전 꼭 읽어주세요
 
-현재 Windows 0.60.8 설치 후보는 **코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen 또는 조직의 보안 정책이 “인식되지 않는 앱”으로 판단할 수 있습니다.
+현재 Windows 0.61.0-rc.1 설치 후보는 **코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen 또는 조직의 보안 정책이 “인식되지 않는 앱”으로 판단할 수 있습니다.
 
 1. 반드시 신뢰할 수 있는 경로로 받은 설치 파일인지 확인합니다.
-2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 0.60.8.exe`를 실행합니다.
+2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 0.61.0-rc.1.exe`를 실행합니다.
 3. 보호 서비스 설치를 위한 Windows 관리자 승인창은 부모가 직접 확인하고 승인합니다.
 4. 신규 설치의 초기 부모 PIN은 `0000`입니다. 설치 직후 관리자 화면의 **부모 PIN 변경**에서 바꿔 주세요.
 5. 첫 사용은 부모 입회하에 짧은 허용 시간으로 감지·경고·종료 동작을 확인합니다.
 
 조직 정책이나 Smart App Control이 차단하는 경우 보안 기능을 끄면서 우회하지 말고, 서명된 빌드를 사용하거나 소스에서 직접 빌드하세요. 자세한 내용은 [Windows 설치 안내](WINDOWS_INSTALL.md)를 확인하세요.
 
-> 소스 코드가 0.60.8인 것과 [GitHub Releases](https://github.com/toughCSB/Playtime-pact/releases)에 0.60.8 설치 파일이 게시된 것은 별개입니다. Release 파일을 사용할 때는 표시된 버전과 검증 정보를 먼저 확인하세요.
+> 0.61.0-rc.1은 부모님 관리 동선과 로컬 승인·설치를 개선한 미서명 테스트 릴리스입니다. 변경 사항과 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요.
 
 ---
 
@@ -73,9 +72,9 @@ Badlion, Feather, Prism Launcher 등 여러 Minecraft 실행 환경을 식별하
 
 ### 메인 화면 · 설정 인증 · 관리자 화면
 
-| 대기 화면 | 설정 진입 시 부모 PIN | 부모 관리자 화면 |
+| 대기 화면 | 기본 규칙 설정 | 오늘 시간 추가 |
 |:-:|:-:|:-:|
-| <img src="screenshots/main-screen.png" alt="Playtime Pact 메인 화면" width="280"> | <img src="screenshots/settings-screen.png" alt="설정 진입 시 부모 PIN 입력 화면" width="280"> | <img src="screenshots/admin-screen.png" alt="부모 관리자 PIN 입력 화면" width="280"> |
+| <img src="screenshots/main-screen.png" alt="Playtime Pact 메인 화면" width="280"> | <img src="screenshots/settings-screen.png" alt="기본 규칙 설정 화면" width="280"> | <img src="screenshots/admin-screen.png" alt="오늘 시간 관리 화면" width="280"> |
 
 > 산뜻한 복셀 어드벤처 테마 · 오늘 남은 시간과 횟수를 한눈에 표시 · 설정과 실시간 제어는 부모 PIN으로 보호
 
@@ -112,13 +111,14 @@ Badlion, Feather, Prism Launcher 등 여러 Minecraft 실행 환경을 식별하
 
 ### 👪 부모
 
-1. **Settings**를 누르고 네 자리 부모 PIN을 입력합니다.
-2. 평일·주말 시간과 횟수, 게임 가능 시간대를 정한 뒤 저장합니다.
-3. 트레이 아이콘을 1.5초 안에 세 번 누르면 부모 관리자 창을 열 수 있습니다.
-4. 관리자 **Timer** 화면에서 시간을 추가·차감하거나 실행 중인 타이머를 중지합니다.
-5. 관리자 **Safety** 화면에서 PIN 변경과 앱·watchdog 종료를 관리합니다.
+1. 메인의 **부모님 관리 · 기본 설정**을 누르고 부모 PIN으로 들어갑니다.
+2. **기본 규칙**에서 평일·주말 시간과 횟수를 저장합니다. 0회는 기본 게임을 허용하지 않는 날입니다.
+3. 메인의 **오늘 시간 추가**는 빠른 추가 화면으로 바로 연결됩니다. 부모님이 추가한 시간은 오늘만 적용됩니다.
+4. **게임 시작 전 부모님 승인 받기**를 켜면 PC PIN 또는 연결된 모바일로 승인할 수 있습니다. PC PIN 승인은 5분 이내의 새 게임 실행 한 번에 적용됩니다.
+5. 관리자 화면 안의 이동과 메인에서 다시 들어올 때 인증을 5분 동안 재사용합니다. 사용을 마치면 **잠금**을 누르세요.
+6. PIN 변경과 재부팅 옵션은 **PIN·기타**, 앱 완전 종료는 기본 규칙의 고급 설정에서 관리합니다.
 
-모바일을 쓰지 않는 가정은 모바일 승인 옵션을 끈 상태로 사용하면 됩니다. 이때 게임은 설정된 로컬 시간 규칙으로 시작하고, 추가 시간과 설정 변경은 이 PC에서 부모 PIN으로 승인합니다.
+모바일 연결은 선택입니다. 인터넷 없이도 PC에서 부모 PIN으로 시작을 승인할 수 있습니다.
 
 ---
 
@@ -246,6 +246,8 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 ---
 
 ## 검증 상태
+
+최신 0.61.0-rc.1의 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요. 아래는 이전 버전의 기록입니다.
 
 2026-09-09 Windows 0.60.8 후보 기준입니다.
 

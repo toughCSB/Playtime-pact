@@ -460,6 +460,14 @@ describe('runtime remote approval broker', () => {
       await new Promise((resolve) => server.close(resolve))
     }
   })
+  it('can read prior usage after reducing the policy to zero without allowing new spending', async () => {
+    const state = { scopes: { 'household-1|pc-1|roblox|UTC|2026-08-05|1': { totalMs: 1000, committedMs: 500, reservedMs: 0, version: 1 } } }
+    const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), state)
+    const client = new PrivilegedBrokerClient((request) => service.invoke(request, 'peer'))
+    await expect(client.readAccounting({ ...accountingScope, totalMs: 0 })).resolves.toMatchObject({ committedMs: 500 })
+    await expect(service.invoke({ capability: 'accounting', purpose: 'start-accounting', nonce: 'rest-day-reserve-0001', operation: 'reserve', payload: { scope: { ...accountingScope, totalMs: 0 }, receipt: 'rest-day-0001:reserve', amountMs: 1, expectedVersion: 1 } }, 'peer')).rejects.toThrow('scope conflict')
+    expect(state.scopes['household-1|pc-1|roblox|UTC|2026-08-05|1'].committedMs).toBe(500)
+  })
   it('persists only administrator-authenticated protected local policy', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-local-policy-'))
     try {
@@ -490,7 +498,7 @@ describe('runtime remote approval broker', () => {
       const client = new PrivilegedBrokerClient((request) => service.invoke(request, 'parent-peer'))
       await expect(client.grantLocalTime(5, 'parent-time:approval-0001')).rejects.toThrow('capability')
       await client.verifyPin('1234')
-      await client.setLocalPolicy({ ianaTimeZone: 'Asia/Seoul', weekdayLimit: 60, weekendLimit: 60, weekdaySessionCount: 1, weekendSessionCount: 1, allowedStartHour: 0, allowedEndHour: 24, requireApprovalBeforeStart: false })
+      await client.setLocalPolicy({ ianaTimeZone: 'Asia/Seoul', weekdayLimit: 60, weekendLimit: 60, weekdaySessionCount: 0, weekendSessionCount: 0, allowedStartHour: 0, allowedEndHour: 24, requireApprovalBeforeStart: false })
       await client.grantLocalTime(5, 'parent-time:approval-0001')
       await client.grantLocalTime(5, 'parent-time:approval-0001')
       await expect(client.grantLocalTime(6, 'parent-time:approval-0001')).rejects.toThrow('conflict')
@@ -499,6 +507,8 @@ describe('runtime remote approval broker', () => {
       expect(Object.values(state.scopes)).toEqual([{ totalMs: 300_000, committedMs: 300_000, reservedMs: 0, version: 1 }])
       const restarted = new PrivilegedApprovalService(async () => ({}), async () => ({}), state, directory)
       expect(PrivilegedApprovalService.loadLocalPolicy(directory).allowedEndHour).toBe(24)
+      expect(PrivilegedApprovalService.loadLocalPolicy(directory).weekdaySessionCount).toBe(0)
+      expect(PrivilegedApprovalService.loadLocalPolicy(directory).weekendSessionCount).toBe(0)
       await expect(new PrivilegedBrokerClient((request) => restarted.invoke(request, 'parent-peer')).grantLocalTime(5, 'parent-time:approval-0002')).rejects.toThrow('capability')
       expect(PrivilegedApprovalService.loadAccounting(directory)).toEqual(state)
     } finally {

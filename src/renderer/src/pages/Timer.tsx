@@ -13,6 +13,7 @@ import { INITIAL_TIMER_PRESENTATION, reduceTimerPresentation } from '../timerPre
 interface Props {
   visible?: boolean
   onOpenSettings: () => void
+  onAddTime?: () => void
   onActiveChange?: (active: boolean) => void
   requestedSurface?: 'play' | 'rules'
 }
@@ -60,7 +61,7 @@ function OverlayRoot({ children, dragEverywhere = false }: { children: ReactNode
   )
 }
 
-export default function Timer({ onOpenSettings, onActiveChange, requestedSurface = 'play', visible = true }: Props) {
+export default function Timer({ onOpenSettings, onAddTime, onActiveChange, requestedSurface = 'play', visible = true }: Props) {
   const [settings, setSettings] = useState<PublicSettings | null>(null)
   const [remainingSeconds, setRemainingSeconds] = useState(0)
   const [isRunning, setIsRunning] = useState(false)
@@ -133,8 +134,16 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
   }, [])
 
   useEffect(() => {
-    if (visible) refreshDailyUsage()
+    if (visible) {
+      refreshDailyUsage()
+      void window.api?.readSettings().then(setSettings).catch(() => showBanner('설정을 불러오지 못했어요.'))
+    }
   }, [visible])
+
+  useEffect(() => window.api?.onSettingsChanged?.((next) => {
+    setSettings(next)
+    refreshDailyUsage()
+  }), [])
 
   function refreshDailyUsage() {
     const getDailyRemaining = window.api?.dailyGetRemaining
@@ -321,12 +330,12 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
       setApprovalPin(attempt.pin)
       const approval = attempt.value
       if (!approval?.ok) {
-        setApprovalError(attempt.error)
+        setApprovalError(attempt.error || '게임을 닫고, 오늘 허용 시간과 횟수를 확인한 뒤 다시 승인해주세요.')
         return
       }
       setApprovalError('')
       setApprovalOpen(false)
-      showBanner('PIN 승인 완료. 타이머는 시작되지 않아요. 게임을 직접 다시 실행해주세요.')
+      showBanner('승인 완료! 5분 안에 Minecraft 또는 Roblox를 실행해주세요.')
       return
     } finally {
       setApprovalPending(false)
@@ -548,14 +557,10 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
 
   const handlePrimaryStart = () => {
     if (requiresParentApproval) {
-      if (remoteIsOutage) {
         approvalTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
         setApprovalPin('')
         setApprovalError('')
         setApprovalOpen(true)
-      } else if (remoteRequestExpired || (remoteState?.lifecycle !== 'request-pending' && remoteState?.lifecycle !== 'approved')) {
-        void handleRemoteRequest()
-      }
       return
     }
     void handleStartTimer()
@@ -632,9 +637,9 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
         <PhoneBottomNav
           current={surface}
           items={[
-            { id: 'play', label: 'Play', icon: '▶' },
-            { id: 'rules', label: 'Rules', icon: '✓' },
-            { id: 'settings', label: 'Settings', icon: '⚙' },
+            { id: 'play', label: '메인', icon: '▶' },
+            { id: 'rules', label: '오늘 규칙', icon: '✓' },
+            { id: 'settings', label: '부모님 관리', icon: '⚙' },
           ]}
           onSelect={(id) => {
             if (id === 'settings') {
@@ -683,7 +688,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
         <span className="ppt-status-strip__label">
           {primaryGameLabel ? `${runningGameSummary} 연결됨` : '게임을 켜면 자동 연결'}
         </span>
-        <span className="ppt-status-strip__quota">{dayType} {todayLimitMinutes}분 · {sessionsCompleted}/{sessionsPerDay}회</span>
+        <span className="ppt-status-strip__quota">{dayType} 총 {todayLimitMinutes * sessionsPerDay}분 · {sessionsCompleted}/{sessionsPerDay}회</span>
       </section>
 
       <section className="ppt-clock-card no-drag" data-glance="time">
@@ -705,45 +710,21 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
       <section className="ppt-action-zone no-drag" data-glance="action">
         {canStart ? (
           <>
-            <button type="button" className="ppt-button ppt-button--primary ppt-button--hero" onClick={handlePrimaryStart} disabled={requiresParentApproval && (remoteLoading || remoteRequestPending || (!remoteRequestExpired && (remoteState?.lifecycle === 'request-pending' || remoteState?.lifecycle === 'approved')))}>
-              {requiresParentApproval
-                ? remoteLoading
-                  ? '원격 승인 상태 확인 중...'
-                  : remoteIsOutage
-                    ? '부모님 승인하고 시작'
-                    : remoteState?.lifecycle === 'approved'
-                      ? '승인됨 · 게임을 다시 실행하세요'
-                      : remoteState?.lifecycle === 'request-pending'
-                        ? '부모님 응답 기다리는 중'
-                        : remoteRequestPending ? '요청 보내는 중...' : '부모님께 승인 요청'
-                : '게임 타임 시작'}
+            <button type="button" className="ppt-button ppt-button--primary ppt-button--hero" onClick={handlePrimaryStart}>
+              {requiresParentApproval ? '부모 PIN으로 시작 승인' : '게임 타임 시작'}
             </button>
             <p className="ppt-helper-text">
-              {requiresParentApproval
-                ? remoteLoading
-                  ? '원격 승인 상태를 확인하는 동안에는 PIN 대체 승인을 사용할 수 없어요.'
-                  : remoteIsOutage
-                    ? '승인 서비스 연결이 안 될 때만 부모님 PIN으로 확인할 수 있어요.'
-                    : '부모님께 요청을 보내면, 승인 후 게임을 직접 다시 실행해야 해요.'
-                : 'Minecraft나 Roblox를 켜면 자동으로 이어져요.'}
+              {requiresParentApproval ? '부모님이 PIN으로 승인한 뒤 5분 안에 게임을 실행해요.' : 'Minecraft나 Roblox를 켜면 자동으로 이어져요.'}
             </p>
-            {requiresParentApproval ? (
-              <div className={`ppt-remote-status${remoteIsOutage || remoteRequestExpired ? ' is-warning' : ''}`} role="status" aria-live="polite">
-                {remoteState?.lifecycle === 'request-pending' && !remoteRequestExpired ? (
-                  <><strong>부모님 응답 대기 중 · {formatTime(remoteSecondsRemaining)}</strong><p>요청은 5분 뒤 만료돼요. 승인되면 게임을 직접 다시 실행해주세요.</p></>
-                ) : remoteState?.lifecycle === 'approved' && !remoteRequestExpired ? (
-                  <><strong>승인됨 · {formatTime(remoteSecondsRemaining)}</strong><p>자동으로 게임을 시작하지 않아요. {primaryGameLabel ?? '게임'}을 직접 다시 실행해주세요.</p></>
-                ) : remoteRequestExpired ? (
-                  <><strong>요청 또는 승인이 만료됐어요.</strong><p>게임이 실행 중이면 새 승인 요청을 보낼 수 있어요.</p></>
-                ) : remoteLoading ? (
-                  <><strong>원격 승인 상태 확인 중</strong><p>연결 상태를 확인하는 동안에는 PIN 대체 승인을 사용할 수 없어요.</p></>
-                ) : remoteIsOutage ? (
-                  <><strong>부모님 승인 서비스 연결 안 됨</strong><p>이 경우에만 부모님 PIN 대체 승인을 사용할 수 있어요.</p></>
-                ) : (
-                  <><strong>원격 승인 준비됨</strong><p>게임을 실행한 뒤 승인 요청을 보내주세요.</p></>
-                )}
-                {remoteError ? <p className="ppt-inline-message ppt-inline-message--danger">{remoteError}</p> : null}
-              </div>
+            {requiresParentApproval && !remoteLoading && !remoteIsOutage ? (
+              <details className="ppt-rules-details">
+                <summary>모바일로 승인 요청</summary>
+                <p className="ppt-helper-text">연결된 부모님 기기로 요청해요. 승인 후 게임을 다시 실행해주세요.</p>
+                <button type="button" className="ppt-button ppt-button--secondary" onClick={() => void handleRemoteRequest()} disabled={remoteRequestPending || (!remoteRequestExpired && remoteState?.lifecycle === 'request-pending')}>
+                  {remoteRequestPending ? '요청 중...' : remoteState?.lifecycle === 'approved' ? '모바일 승인됨' : remoteState?.lifecycle === 'request-pending' ? '응답 기다리는 중' : '모바일 승인 요청 보내기'}
+                </button>
+                {remoteError ? <p role="alert">{remoteError}</p> : null}
+              </details>
             ) : null}
           </>
         ) : (
@@ -766,6 +747,10 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
         ) : null}
       </section>
 
+      <div className="ppt-parent-shortcuts no-drag">
+        <button type="button" className="ppt-button ppt-button--secondary" onClick={onAddTime ?? onOpenSettings}>＋ 오늘 시간 추가</button>
+        <button type="button" className="ppt-button ppt-button--ghost" onClick={onOpenSettings}>⚙ 부모님 관리 · 기본 설정</button>
+      </div>
       <details className="ppt-rules-details no-drag" open={surface === 'rules'}>
         <summary>오늘 규칙 보기</summary>
         <ul>
@@ -788,7 +773,7 @@ export default function Timer({ onOpenSettings, onActiveChange, requestedSurface
       {approvalOpen ? (
         <div className="ppt-modal-backdrop app-drag" role="presentation">
           <div ref={approvalDialogRef} className="ppt-dialog ppt-dialog--pin no-drag" role="dialog" aria-modal="true" aria-labelledby="approval-pin-title" tabIndex={-1}>
-            <p className="ppt-dialog__eyebrow">연결 장애 시 대체 승인</p>
+            <p className="ppt-dialog__eyebrow">이 PC에서 게임 시작 승인</p>
             <h2 id="approval-pin-title" className="ppt-dialog__title">PIN을 눌러주세요</h2>
             <PinPad
               id="approval-pin"

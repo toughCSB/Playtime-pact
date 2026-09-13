@@ -1,8 +1,18 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-const source = readFileSync('build/installer.nsh', 'utf8')
+const source = readFileSync('build/installer.nsh', 'utf8').replace(/\r\n/g, '\n')
 const macro = (name) => source.slice(source.indexOf(`!macro ${name}\n`), source.indexOf('!macroend', source.indexOf(`!macro ${name}\n`)))
 describe('installer rollback boundaries', () => {
+  it('retries cold-start readiness and preserves service registration on a failed check', () => {
+    const install = macro('customInstall')
+    expect(install).toContain('/TIMEOUT=30000')
+    expect(install).toContain('$R6 < 5')
+    const failure = install.slice(install.indexOf('FileOpen $R1 "C:\\ProgramData\\PlaytimePact\\install-health.log"'))
+    expect(failure).toContain('Installation is not complete.')
+    expect(failure).toContain('Abort')
+    expect(failure).not.toContain('" uninstall')
+    expect(macro('customUnInstall')).toContain('$R3 == 1060')
+  })
   it('does not destroy protected policy selectors on uninstall or update', () => {
     expect(source).not.toMatch(/DeleteRegKey\s+HKLM\s+"Software\\PlaytimePact"/i)
   })

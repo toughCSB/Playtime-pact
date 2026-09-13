@@ -33,7 +33,8 @@ export async function attemptParentApproval(
   }
   try {
     const value = await approve(pin)
-    return { value, pin: '', error: value.ok ? '' : 'PIN이 올바르지 않아요.' }
+    return { value, pin: '', error: value.ok ? '' : value.reason === 'start-unavailable'
+      ? '게임을 닫고, 오늘 허용 시간과 횟수를 확인한 뒤 다시 승인해주세요.' : 'PIN이 올바르지 않아요.' }
   } catch {
     return { value: null, pin: '', error: '승인 서비스에 연결할 수 없어요. 잠시 후 다시 시도해주세요. 문제가 계속되면 Playtime Pact를 다시 시작해주세요.' }
   }

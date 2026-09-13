@@ -17,6 +17,11 @@ import type {
 
 const api = {
   readSettings: (): Promise<PublicSettings> => ipcRenderer.invoke('settings:read'),
+  onSettingsChanged: (cb: (settings: PublicSettings) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, settings: PublicSettings) => cb(settings)
+    ipcRenderer.on('settings:changed', handler)
+    return () => ipcRenderer.removeListener('settings:changed', handler)
+  },
   writeSettings: (s: PublicSettings): Promise<PublicSettings> => ipcRenderer.invoke('settings:write', s),
   readSessions: (): Promise<Session[]> => ipcRenderer.invoke('sessions:read'),
 
@@ -35,6 +40,8 @@ const api = {
 
   adminVerifyPassword: (pin: string): Promise<boolean> =>
     ipcRenderer.invoke('admin:verify-password', { pin }),
+  adminIsUnlocked: (): Promise<boolean> => ipcRenderer.invoke('admin:is-unlocked'),
+  adminLock: (): Promise<void> => ipcRenderer.invoke('admin:lock'),
   adminUnlockSettings: (pin: string): Promise<boolean> =>
     ipcRenderer.invoke('admin:unlock-settings', { pin }),
   adminApproveNextSession: (pin: string): Promise<AdminApprovalResult> =>

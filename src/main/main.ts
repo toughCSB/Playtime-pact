@@ -20,6 +20,7 @@ import {
 } from './fileStore'
 import { isHourAllowed } from '../shared/policy'
 import { shouldRequireApprovalForStart } from '../shared/startPolicy'
+import { LocalStartApproval } from '../shared/localStartApproval'
 import { shouldBlockTimerStartWithoutSupportedGame, shouldPauseTimerWhenSupportedGameMissing } from '../shared/robloxSync'
 import { listSecondaryManagedGames, selectPrimaryManagedGame, type ManagedGameSnapshot } from '../shared/managedGames'
 import { normalizeTimerAdjustmentMinutes } from '../shared/timerAdjust'
@@ -521,36 +522,15 @@ function applyManagedGameSnapshot(
   }
 }
 
+const parentStartApproval = new LocalStartApproval()
+let parentStartPending = false
 async function approveNextSession(): Promise<boolean> {
-  const gameId = blockedApprovalGameId
-  const snapshot = await getManagedGameSnapshot()
-  if (blockedApprovalGameId !== gameId) return false
-  // PIN fallback is an outage/local-only authority and can be armed only after the
-  // blocked original process has exited. It never launches a replacement process.
-  if (!gameId || !remoteApprovalController.allowsLocalFallback() || snapshot.activeGameIds.includes(gameId)) return false
-  const issuedAt = Date.now()
-  const remoteState = remoteApprovalController.getState()
-  if (!remoteState.householdId || !remoteState.pcId || !remoteState.membershipEpoch || !remoteState.serviceEpoch || !protectedLocalPolicy) return false
-  const permission: RemoteApprovalPermissionTuple = {
-    householdId: 'local-outage',
-    requestId: `local-${gameId}-${issuedAt}`,
-    pcId: remoteState.pcId,
-    gameId,
-    // Local policy revisions do not mint new allowance; one stable local
-    // accounting epoch preserves usage high-water across policy edits.
-    allowanceVersion: 1,
-    processId: 'first-fresh-process',
-    processStartedAt: issuedAt,
-  }
-  try {
-    await remoteStartCoordinator.issueLocalPreauthorization({
-      permission,
-      bindFirstProcess: true,
-    }, getTodaySessionCount().perSessionMinutes)
-    return true
-  } catch {
-    return false
-  }
+  if (!protectedLocalPolicy || accountingIntegrityFault || !isAllowedHour()
+    || isSessionExhausted(getLocalDateString()) || gameTerminationPending) return false
+  const games = await getManagedGameSnapshot()
+  if (games.activeGameIds.length > 0) return false
+  parentStartApproval.issue(protectedLocalPolicy.version)
+  return true
 }
 
 function getTrustedManagedProcess(snapshot: ManagedGameSnapshot, gameId: ManagedGameId | undefined): { gameId: ManagedGameId; processId: string; processStartedAt: number } | null {
@@ -583,7 +563,7 @@ function localPolicyScope(permission: RemoteApprovalPermissionTuple): ProtectedA
   const today = new Date(`${ianaDay}T12:00:00Z`).getUTCDay()
   const weekend = today === 0 || today === 6
   const totalMs = (weekend ? protectedLocalPolicy.weekendLimit * protectedLocalPolicy.weekendSessionCount : protectedLocalPolicy.weekdayLimit * protectedLocalPolicy.weekdaySessionCount) * 60_000
-  if (!Number.isSafeInteger(totalMs) || totalMs <= 0) throw new Error('Local policy allowance unavailable')
+  if (!Number.isSafeInteger(totalMs) || totalMs < 0) throw new Error('Local policy allowance unavailable')
   return {
     householdId: permission.householdId,
     pcId: permission.pcId,
@@ -727,7 +707,7 @@ function readPausedTimerResumeState(today: string, fallbackRemainingMs: number) 
 }
 
 function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boolean {
-  if (gameTerminationPending || timerAdjustmentInFlight || usageWritesPending > 0) return false
+  if (gameTerminationPending || timerAdjustmentInFlight || parentStartPending || usageWritesPending > 0) return false
   if (accountingIntegrityFault) {
     enforceManagedGameBlock('daily-exhausted', snapshot.activeGameIds[0])
     return false
@@ -766,6 +746,15 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
     return false
   }
   if (!protectedLocalPolicy) return false
+  const pinProcess = getTrustedManagedProcess(snapshot, primaryManagedGameId ?? snapshot.activeGameIds[0])
+  if (pinProcess && parentStartApproval.claim(pinProcess.processStartedAt, protectedLocalPolicy.version)) {
+    parentStartPending = true
+    void remoteStartCoordinator.startPolicyAuthorized(pinProcess, perSessionMinutes)
+      .then((started) => { if (!started && timerStart === null) enforceManagedGameBlock('approval-required', pinProcess.gameId) })
+      .catch(() => enforceManagedGameBlock('approval-required', pinProcess.gameId))
+      .finally(() => { parentStartPending = false })
+    return false
+  }
   if (!shouldRequireApprovalForStart(protectedLocalPolicy, { hasActiveSession: false })) {
     const process = snapshot.classifiedProcesses.find((candidate) => candidate.gameId === (primaryManagedGameId ?? snapshot.activeGameIds[0]))
     const startedAt = process && observedProcessStartedAt.get(process.pid)
@@ -1162,7 +1151,7 @@ async function adjustManagedTime(minutes: number): Promise<number> {
   const usage = getDailyUsage()
   const paused = readTimerState()
   const hasPaused = paused?.date === getLocalDateString() && usage.currentSessionRemainingMs > 0
-  if (timerStart === null && !hasPaused && (!isSessionExhausted(getLocalDateString()) || delta < 0)) throw new Error('Start a game before adjusting time')
+  if (timerStart === null && !hasPaused && delta < 0) throw new Error('No active time to deduct')
   timerAdjustmentInFlight = true
   const receipt = `parent-time:${randomUUID()}`
   try {
@@ -1937,7 +1926,7 @@ if (initializeLocalProtectionMode && !privilegedServiceMode) {
       stateDir,
     )
     await startPrivilegedPipeServer(hosted)
-  }).catch(() => app.exit(1))
+  }).catch((error: unknown) => { process.stderr.write(formatPrivilegedHealthDiagnostic(error)); app.exit(1) })
 } else if (privilegedHealthCheckMode) {
   app.whenReady().then(async () => {
     await privilegedBroker.healthCheck()

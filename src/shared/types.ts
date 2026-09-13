@@ -258,6 +258,7 @@ export interface AdminApprovalResult {
   ok: boolean
   launchedPendingGame: boolean
   preauthorizedNextLaunch?: boolean
+  reason?: 'invalid-pin' | 'start-unavailable'
 }
 
 export interface ManagedGameEventPayload {

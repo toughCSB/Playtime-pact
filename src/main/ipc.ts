@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { BrowserWindow, ipcMain } from 'electron'
 
 import {
   readSettings,
@@ -7,7 +7,7 @@ import {
   readDailyUsage,
   writeDailyUsage,
 } from './fileStore'
-import { grantAdminSession, requireAdminSession } from './adminAuth'
+import { grantAdminSession, requireAdminSession, hasAdminSession, clearAdminSession } from './adminAuth'
 
 import { redactSettings } from '../shared/policy'
 import { isDailyUsageExhausted, normalizeDailyUsage, shouldPersistNormalizedDailyUsage } from '../shared/dailyUsage'
@@ -70,6 +70,8 @@ export function registerIpcHandlers(callbacks: {
   }
 } = {}): void {
   ipcMain.handle('settings:read', async () => callbacks.readPublicSettings?.() ?? redactSettings(readSettings()))
+  ipcMain.handle('admin:is-unlocked', async (event) => hasAdminSession(event))
+  ipcMain.handle('admin:lock', async (event) => { clearAdminSession(event.sender.id) })
 
   ipcMain.handle('settings:write', async (event, settings: PublicSettings) => {
     requireAdminSession(event)
@@ -77,7 +79,9 @@ export function registerIpcHandlers(callbacks: {
     if (!callbacks.protectLocalPolicy) throw new Error('protected local policy unavailable')
     await callbacks.protectLocalPolicy(settings)
     writeSettings({ ...current, ...settings, adminPasswordHash: current.adminPasswordHash })
-    return redactSettings(readSettings())
+    const saved = callbacks.readPublicSettings?.() ?? redactSettings(readSettings())
+    for (const win of BrowserWindow.getAllWindows()) win.webContents.send('settings:changed', saved)
+    return saved
   })
 
   ipcMain.handle('sessions:read', async () => readSessions())
@@ -98,7 +102,8 @@ export function registerIpcHandlers(callbacks: {
   ipcMain.handle('admin:approve-next-session', async (_event, { pin }: { pin: string }) => {
     const ok = await verifyAdminPin(pin, callbacks.verifyAdminPin)
     const preauthorizedNextLaunch = ok && await callbacks.approveNextSession?.() === true
-    return { ok, launchedPendingGame: false, preauthorizedNextLaunch }
+    return { ok: ok && preauthorizedNextLaunch, launchedPendingGame: false, preauthorizedNextLaunch,
+      reason: !ok ? 'invalid-pin' : !preauthorizedNextLaunch ? 'start-unavailable' : undefined }
   })
 
   ipcMain.handle('admin:change-password', async (event, { currentPin, newPin }: { currentPin: string; newPin: string }) => {

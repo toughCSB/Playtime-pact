@@ -135,8 +135,8 @@ function normalizeSettings(settings: Partial<Settings>): Settings {
   // 수치 필드 전체 검증 — NaN/Infinity/범위 초과 시 기본값으로 교체
   merged.weekdayLimit        = safeInt(merged.weekdayLimit,        DEFAULT_SETTINGS.weekdayLimit,        1, 480)
   merged.weekendLimit        = safeInt(merged.weekendLimit,        DEFAULT_SETTINGS.weekendLimit,        1, 480)
-  merged.weekdaySessionCount = safeInt(merged.weekdaySessionCount, DEFAULT_SETTINGS.weekdaySessionCount, 1,  10)
-  merged.weekendSessionCount = safeInt(merged.weekendSessionCount, DEFAULT_SETTINGS.weekendSessionCount, 1,  10)
+  merged.weekdaySessionCount = safeInt(merged.weekdaySessionCount, DEFAULT_SETTINGS.weekdaySessionCount, 0,  10)
+  merged.weekendSessionCount = safeInt(merged.weekendSessionCount, DEFAULT_SETTINGS.weekendSessionCount, 0,  10)
   merged.allowedStartHour    = safeInt(merged.allowedStartHour,    DEFAULT_SETTINGS.allowedStartHour,    0,  23)
   merged.allowedEndHour      = safeInt(merged.allowedEndHour,      DEFAULT_SETTINGS.allowedEndHour,      0,  24)
   if (merged.allowedStartHour === merged.allowedEndHour) {

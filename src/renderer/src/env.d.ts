@@ -22,6 +22,9 @@ declare global {
   interface Window {
     api?: {
       readSettings(): Promise<PublicSettings>
+      onSettingsChanged(cb: (settings: PublicSettings) => void): () => void
+      adminIsUnlocked(): Promise<boolean>
+      adminLock(): Promise<void>
       writeSettings(s: PublicSettings): Promise<PublicSettings>
       readSessions(): Promise<Session[]>
 
