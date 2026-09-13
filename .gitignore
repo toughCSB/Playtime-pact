@@ -3,6 +3,7 @@ out/
 dist/
 dist-*/
 dist-v*/
+build/native/*.exe
 *.log
 .env.local
 .env

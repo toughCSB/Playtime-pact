@@ -4,6 +4,30 @@
 ; 설치 시: 관리자 권한 Scheduled Task 등록 + 느리게 스트레칭된 PIN verifier 초기화
 ; 제거 시: customUnInit에서 PIN 검증 (틀리면 Abort) → customUnInstall에서 정리
 
+; 이전 설치본의 제거기는 PIN/서비스/감시 프로세스 처리 방식이 서로 다르다.
+; 새 verifier로 먼저 승인한 뒤 in-place upgrade helper를 제거기로 사용하면
+; 제한 언어 모드와 구버전 파일 잠금 버그에 의존하지 않고 안전하게 교체할 수 있다.
+!macro customInit
+  SetRegView 64
+  ReadRegStr $R7 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\6491a751-fe68-52d6-bee4-d790b73e3eb9" "DisplayVersion"
+  ${If} $R7 == "0.60.8"
+  ${OrIf} $R7 == "0.61.0-rc.1"
+  ${OrIf} $R7 == "0.61.0-rc.2"
+  ${OrIf} $R7 == "0.61.0-rc.3"
+  ${OrIf} $R7 == "0.61.0-rc.4"
+  ${OrIf} $R7 == "0.61.0-rc.5"
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR"
+    File /oname=PlaytimePactInstallerAuth.exe "${PROJECT_DIR}\build\native\PlaytimePactInstallerAuth.exe"
+    ExecWait '"$PLUGINSDIR\PlaytimePactInstallerAuth.exe" --authorize-upgrade' $R5
+    ${If} $R5 != 0
+      Abort "Parent PIN authorization was cancelled or failed."
+    ${EndIf}
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\6491a751-fe68-52d6-bee4-d790b73e3eb9" "UninstallString" '$\"$PLUGINSDIR\PlaytimePactInstallerAuth.exe$\"'
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\6491a751-fe68-52d6-bee4-d790b73e3eb9" "QuietUninstallString" '$\"$PLUGINSDIR\PlaytimePactInstallerAuth.exe$\" /S'
+  ${EndIf}
+!macroend
+
 !macro customInstall
   ; 설치/업데이트 중 기존 watchdog이 앱을 다시 띄워 app.asar 제거를 막지 않도록 먼저 정지
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PlaytimePact"
@@ -43,6 +67,13 @@
   ExecWait `icacls.exe C:\ProgramData\PlaytimePact\Data\*.json /inheritance:e /grant:r *S-1-5-18:F *S-1-5-32-544:F *S-1-5-32-545:M /C`
   ExecWait `cmd.exe /c mkdir C:\ProgramData\PlaytimePact\Broker C:\ProgramData\PlaytimePact\Broker\Accounting 2>nul`
   ExecWait `icacls.exe C:\ProgramData\PlaytimePact\Broker /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /T /C`
+  ; Repair protected usage files as LocalSystem. Existing versions could leave a
+  ; child file with an ACL that neither the service nor elevated installer could replace.
+  ExecWait '"$INSTDIR\resources\PlaytimePactInstallerAuth.exe" --repair-protection' $R5
+  ${If} $R5 != 0
+    MessageBox MB_OK|MB_ICONSTOP "Protected usage permissions could not be repaired. No protected data was removed."
+    Abort
+  ${EndIf}
   ExecWait `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$$p='C:\ProgramData\PlaytimePact\Admin\admin-secret.json'; $$default='9af15b336e6a9619928537df30b2e6a2376569fcf9d7e773eccede65606529a0'; $$rewrite=$$false; if (!(Test-Path -LiteralPath $$p)) { $$rewrite=$$true } else { try { $$parsed=Get-Content -LiteralPath $$p -Raw | ConvertFrom-Json } catch { $$parsed=$$null }; if ($$null -ne $$parsed -and $$parsed.adminPasswordHash -eq $$default) { $$rewrite=$$true } }; if ($$rewrite) { $$salt=New-Object byte[] 16; $$rng=[System.Security.Cryptography.RNGCryptoServiceProvider]::new(); $$rng.GetBytes($$salt); $$rng.Dispose(); $$derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new('0000',$$salt,1500000,[System.Security.Cryptography.HashAlgorithmName]::SHA256); $$hash=($$derive.GetBytes(32) | ForEach-Object { $$_.ToString('x2') }) -join ''; $$derive.Dispose(); $$secret=[ordered]@{ schemaVersion=1; algorithm='pbkdf2-sha256'; iterations=1500000; salt=[Convert]::ToBase64String($$salt); hash=$$hash } | ConvertTo-Json -Compress; [System.IO.File]::WriteAllText($$p,$$secret,[System.Text.UTF8Encoding]::new($$false)) }"`
   ExecWait `icacls.exe C:\ProgramData\PlaytimePact\Admin\admin-secret.json /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F /C`
   ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop'
@@ -124,33 +155,8 @@
 ; 제거 시작 전 PIN 검증 — electron-builder un.onInit 내부에서 customUnInit 호출됨
 ; 여기서 Abort하면 파일 삭제 전에 완전 취소됨
 !macro customUnInit
-  ; 보호된 C:\ProgramData\PlaytimePact\Admin\admin-secret.json의 PIN verifier와 입력 PIN을 비교한다.
-  ; PIN 원문은 레지스트리에 저장하지 않는다.
-  GetTempFileName $R0
-  Rename $R0 "$R0.ps1"
-  StrCpy $R0 "$R0.ps1"
-
-  FileOpen $R1 $R0 w
-  FileWrite $R1 'Add-Type -AssemblyName Microsoft.VisualBasic$\r$\n'
-  FileWrite $R1 '$$pin=[Microsoft.VisualBasic.Interaction]::InputBox("Enter admin PIN to uninstall Playtime Pact.","Playtime Pact - Uninstall","")$\r$\n'
-  FileWrite $R1 '$$root=[Environment]::GetFolderPath("CommonApplicationData")$\r$\n'
-  FileWrite $R1 '$$secret=Join-Path $$root "PlaytimePact\Admin\admin-secret.json"$\r$\n'
-  FileWrite $R1 'if (!(Test-Path -LiteralPath $$secret)) { exit 2 }$\r$\n'
-  FileWrite $R1 '$$parsed=Get-Content -LiteralPath $$secret -Raw | ConvertFrom-Json$\r$\n'
-  FileWrite $R1 'if ($$parsed.schemaVersion -eq 1 -and $$parsed.algorithm -eq "pbkdf2-sha256") { try { $$salt=[Convert]::FromBase64String([string]$$parsed.salt) } catch { exit 3 }; $$iterations=[int]$$parsed.iterations; $$expected=[string]$$parsed.hash; if ($$iterations -lt 100000 -or !($$expected -match "^[0-9a-f]{64}$$")) { exit 3 }; $$derive=[System.Security.Cryptography.Rfc2898DeriveBytes]::new($$pin,$$salt,$$iterations,[System.Security.Cryptography.HashAlgorithmName]::SHA256); $$actual=($$derive.GetBytes(32) | ForEach-Object { $$_.ToString("x2") }) -join ""; $$derive.Dispose(); if ($$actual -ne $$expected) { exit 4 }; exit 0 }$\r$\n'
-  FileWrite $R1 '$$expected=[string]$$parsed.adminPasswordHash$\r$\n'
-  FileWrite $R1 'if (!($$expected -match "^[0-9a-f]{64}$$")) { exit 3 }$\r$\n'
-  FileWrite $R1 '$$sha=[System.Security.Cryptography.SHA256]::Create()$\r$\n'
-  FileWrite $R1 '$$bytes=[Text.Encoding]::UTF8.GetBytes($$pin)$\r$\n'
-  FileWrite $R1 '$$actual=($$sha.ComputeHash($$bytes) | ForEach-Object { $$_.ToString("x2") }) -join ""$\r$\n'
-  FileWrite $R1 'if ($$actual -ne $$expected) { exit 4 }$\r$\n'
-  FileClose $R1
-
-  nsExec::ExecToStack '"powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$R0"'
-  Pop $R3
-  Pop $R4
-  Delete $R0
-
+  ; PowerShell language mode와 무관한 native verifier가 보호된 PIN verifier를 읽는다.
+  ExecWait '"$INSTDIR\resources\PlaytimePactInstallerAuth.exe" --verify' $R3
   ${If} $R3 != 0
     MessageBox MB_OK|MB_ICONSTOP "PIN verification failed. Uninstall cancelled."
     Abort
@@ -165,14 +171,19 @@
   FileOpen $R1 "C:\ProgramData\PlaytimePact\watchdog-disabled.flag" w
   FileWrite $R1 'uninstall'
   FileClose $R1
-  nsExec::ExecToStack 'sc.exe query PlaytimePactPrivilegedBroker'
-  Pop $R3
-  Pop $R4
+  ; sc.exe reports 1062 when an existing service is already stopped. That is
+  ; a successful uninstall precondition, not a protection failure.
+  ExecWait 'sc.exe stop PlaytimePactPrivilegedBroker' $R3
   ${If} $R3 == 1060
-    ; Repair of a previous failed installation whose service was rolled back.
     StrCpy $R3 0
-  ${Else}
+  ${ElseIf} $R3 == 1062
+    StrCpy $R3 0
+  ${ElseIf} $R3 != 0
+    ; WinSW remains a fallback for unusual service-control failures.
     ExecWait '"$INSTDIR\PlaytimePactPrivilegedBroker.exe" stop' $R3
+  ${Else}
+    ; Allow a normal STOP_PENDING transition to release file handles.
+    Sleep 1500
   ${EndIf}
   ${If} $R3 != 0
     Delete "C:\ProgramData\PlaytimePact\watchdog-disabled.flag"

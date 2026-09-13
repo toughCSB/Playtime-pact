@@ -2,7 +2,7 @@
 
 > **부모와 자녀가 함께 정한 Roblox·Minecraft 게임 시간을 눈에 보이게 만들고, 자녀가 스스로 약속을 지키도록 돕는 Windows 데스크톱 타이머 앱**
 
-[![Version](https://img.shields.io/badge/version-0.61.0--rc.1-blue)](RELEASE_NOTES_0.61.0.md)
+[![Version](https://img.shields.io/badge/version-0.61.0--rc.7-blue)](RELEASE_NOTES_0.61.0.md)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)](#-설치-및-실행)
 [![Games](https://img.shields.io/badge/games-Roblox%20%7C%20Minecraft%20%7C%20Lunar-45b97c)](#-지원-게임)
 [![License](https://img.shields.io/badge/license-MIT-green)](#-라이선스)
@@ -11,17 +11,17 @@
 
 ## ⚠️ Windows 설치 전 꼭 읽어주세요
 
-현재 Windows 0.61.0-rc.1 설치 후보는 **코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen 또는 조직의 보안 정책이 “인식되지 않는 앱”으로 판단할 수 있습니다.
+현재 Windows 0.61.0-rc.7 설치 후보는 **공인 코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen, Smart App Control 또는 조직의 App Control 정책이 실행을 경고하거나 완전히 차단할 수 있습니다.
 
 1. 반드시 신뢰할 수 있는 경로로 받은 설치 파일인지 확인합니다.
-2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 0.61.0-rc.1.exe`를 실행합니다.
+2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 0.61.0-rc.7.exe`를 실행합니다.
 3. 보호 서비스 설치를 위한 Windows 관리자 승인창은 부모가 직접 확인하고 승인합니다.
 4. 신규 설치의 초기 부모 PIN은 `0000`입니다. 설치 직후 관리자 화면의 **부모 PIN 변경**에서 바꿔 주세요.
 5. 첫 사용은 부모 입회하에 짧은 허용 시간으로 감지·경고·종료 동작을 확인합니다.
 
-조직 정책이나 Smart App Control이 차단하는 경우 보안 기능을 끄면서 우회하지 말고, 서명된 빌드를 사용하거나 소스에서 직접 빌드하세요. 자세한 내용은 [Windows 설치 안내](WINDOWS_INSTALL.md)를 확인하세요.
+Smart App Control에는 개별 앱 예외가 없습니다. 공개 배포에서는 CA가 발급한 신뢰된 인증서, Microsoft Store 서명 또는 자격을 충족한 오픈소스 서명 서비스를 사용해야 합니다. 로컬 자체 서명이나 unsigned 빌드는 다른 PC의 차단을 해소하지 못합니다. 보안 기능 해제를 일반 설치 방법으로 안내하지 않습니다. 자세한 내용은 [Windows 설치 안내](WINDOWS_INSTALL.md)를 확인하세요.
 
-> 0.61.0-rc.1은 부모님 관리 동선과 로컬 승인·설치를 개선한 미서명 테스트 릴리스입니다. 변경 사항과 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요.
+> 0.61.0-rc.7은 부모님 관리 동선, 로컬 승인, PIN 검증과 보호 서비스·구버전 파일 잠금 복구를 개선한 미서명 테스트 릴리스입니다. 설치 인증 로직과 신뢰된 배포자 서명은 서로 다른 문제이며, 현재 남은 공개 배포 차단 요인은 코드 서명입니다.
 
 ---
 
@@ -214,7 +214,10 @@ Badlion, Feather, Prism Launcher 등 여러 Minecraft 실행 환경을 식별하
 - Windows 앱 제거를 시작하면 부모 PIN 입력 다이얼로그 표시
 - 틀린 PIN이나 취소 시 제거 중단
 - PIN 원문 대신 salt가 포함된 PBKDF2-SHA256 검증자를 보호된 폴더에 저장
+- PowerShell 제한 언어 모드와 무관한 네이티브 PIN 검사기 사용
+- PIN 파일이 SYSTEM 전용이어도 일회성 LocalSystem 서비스와 보호된 named pipe로 검증
 - 제거 중 파일이 잠기면 기존 파일·서비스를 복구하고 readiness 검사를 거친 뒤 중단하도록 설계
+- 기존 서비스가 이미 중지됐거나 등록되지 않은 상태도 정상적인 제거 조건으로 처리
 
 모든 PC와 모든 파일 잠금 조합의 복구가 실기기로 검증됐다는 의미는 아닙니다. 관리자 권한 보유자는 운영체제 수준에서 이 보호를 우회할 수 있습니다.
 
@@ -228,6 +231,38 @@ Badlion, Feather, Prism Launcher 등 여러 Minecraft 실행 환경을 식별하
 - 부모 추가 시간은 보호된 PC 사용량과 함께 반영
 
 Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의 출시 검증이 필요합니다. 모바일 코드가 저장소에 있다는 사실만으로 모바일 기능이 배포 완료된 것은 아닙니다.
+
+---
+
+## ✅ v0.61.0-rc.7 설치·보호 복구 변경 요약
+
+- `0.60.8`과 이전 `0.61.0-rc` 설치본의 제거 PIN 경로를 네이티브 검사기로 전환
+- SYSTEM 전용 `admin-secret.json`을 관리자 프로세스에서 직접 열지 않고, 임시 LocalSystem 서비스와 보호된 named pipe를 통해 PIN 일치 여부만 확인
+- PIN 원문·해시·salt를 명령줄과 진단 로그에 남기지 않는 부모 PIN 복구 경로 추가
+- 기존 제거기가 PowerShell 제한 언어 모드에서 실패하거나 앱 재실행으로 파일 잠금을 남기는 경우 새 검사기와 in-place 정리 경로로 교체해 업그레이드
+- 이미 멈춘 서비스의 Windows 오류 `1062`와 등록되지 않은 서비스의 `1060`을 제거 실패로 오인하지 않도록 수정
+- `Broker\Accounting\desktop-usage.json` 등 보호 사용량 파일의 잘못된 소유권·ACL을 LocalSystem에서 내용 삭제 없이 자동 복구
+- 보호 서비스 시작 실패 시 경로·비밀값 대신 `filesystem-access`, `policy-selector`, `named-pipe` 등 허용된 진단 분류만 기록
+- 설치 후 서비스 IPC readiness가 실제로 통과해야 설치 성공으로 처리
+
+### 2026-09-13 실기기 복구 확인
+
+| 확인 항목 | 결과 |
+|---|---|
+| 부모 PIN 재설정 및 재검증 | 통과 (`ok-system`) |
+| 구버전 제거기 우회용 네이티브 PIN 승인·정리 | 통과 |
+| 보호 사용량 ACL 진단 | `desktop-usage.json` 접근 거부 원인 확인 |
+| LocalSystem ACL 복구 | 통과 (`protection-repair-ok`) |
+| `PlaytimePactPrivilegedBroker` 서비스 | `RUNNING` 확인 |
+| 설치 앱의 보호 IPC readiness | 종료 코드 `0` 확인 |
+| 앱 프로세스 실행 | 확인 |
+| rc.7 설치 안전성·패키지 계약 테스트 | 37개 통과 |
+| rc.7 NSIS x64 설치 파일 생성 | 통과 |
+| rc.5 → rc.7 실제 업그레이드 | 통과 — 설치 종료 코드 `0`, 파일 잠금 오류 미재발 |
+| rc.7 설치 후 버전·서비스·IPC | `0.61.0-rc.7`, 서비스 `RUNNING`, readiness 종료 코드 `0` |
+| Smart App Control이 켜진 PC의 unsigned 실행 | 차단 확인 — 신뢰된 코드 서명 필요 |
+
+부모 PIN 인증 오류와 보호 서비스 파일 권한 오류의 원인은 수정·검증했습니다. 다만 **공인 서명이 없는 설치본을 Smart App Control이 켜진 다른 PC에서 경고 없이 설치하는 문제는 해결되지 않았습니다.** 자체 서명 인증서는 공개 배포 해결책이 아니며, 정식 릴리스 전 신뢰된 서명 파이프라인이 필요합니다.
 
 ---
 
@@ -247,7 +282,7 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 
 ## 검증 상태
 
-최신 0.61.0-rc.1의 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요. 아래는 이전 버전의 기록입니다.
+최신 0.61.0-rc.7의 상세 기능 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요. 아래 표는 0.60.8 전체 회귀검사 기록이며, rc.7 설치 복구의 추가 확인 결과는 위에 정리했습니다.
 
 2026-09-09 Windows 0.60.8 후보 기준입니다.
 
@@ -265,14 +300,14 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 ### 아직 확인하지 못한 항목
 
 - 다른 PC의 완전 신규 설치
-- 최신 NSIS 설치본의 전체 업그레이드 및 모든 파일 잠금 복구 조합
+- 다른 구버전과 외부 프로그램을 포함한 모든 파일 잠금 복구 조합
 - Roblox·Minecraft Bedrock의 최신 실게임 종단 흐름
 - 모든 경고 시점의 실제 게임 화면 표시와 월드 저장 무결성
 - 신뢰된 코드 서명과 경고 없는 공개 배포
 - Android 실기기·FCM 운영·원격 서버 배포
 - macOS 설치 및 동작
 
-자동 테스트 통과는 실기기에서 모든 조합이 정상이라는 뜻이 아닙니다. 위 한계를 유지한 채 Windows 0.60.8 후보로 관리합니다.
+자동 테스트 통과는 실기기에서 모든 조합이 정상이라는 뜻이 아닙니다. 위 한계를 유지한 채 Windows 0.61.0-rc.7 설치 후보로 관리합니다.
 
 ---
 
@@ -384,6 +419,9 @@ npm run package:win
 
 | 버전 | 날짜 | 주요 변경 |
 |---|---|---|
+| **v0.61.0-rc.7** | 2026-09-13 | rc.2~rc.5 구버전 제거기를 우회하는 승인된 in-place 업그레이드와 감시 프로세스 종료 대기 보강 |
+| **v0.61.0-rc.6** | 2026-09-13 | 네이티브 PIN 검증·복구, 구버전 검사기 교체, 보호 파일 ACL 자동 복구, 서비스 제거·readiness 진단 보강 |
+| **v0.61.0-rc.1** | 2026-09-13 | 창 드래그 이동, 실시간 일일 허용량, 0회 설정, PC 부모 PIN 승인, 관리자·간편 시간 추가 UI 개편 |
 | **v0.60.8** | 2026-09-09 | Minecraft/Lunar 지원, 비동기 게임 감지, 정상 종료·강제 종료 보강, 보호 사용량·설치 복구·UI 개선 |
 | **v0.60.6** | 2026-06-02 | Electron/Vite/electron-builder 보안 업그레이드와 daily-usage 조회 안정화 |
 | **v0.60.5** | 2026-06-01 | 부팅 자동 실행 숨김 시작과 재부팅 후 세션 완료 횟수 복구 |
@@ -406,7 +444,7 @@ npm run package:win
 - [x] Roblox·Minecraft Java/Bedrock 및 Lunar Minecraft 감지
 - [x] Windows 보호 서비스와 부모 PIN 관리
 - [x] 정상 종료 요청·신원 재확인·강제 종료 fallback
-- [x] 0.60.8 Windows 설치 후보와 자동 회귀검사
+- [x] 0.61.0-rc.7 Windows 설치 후보와 설치 복구 회귀검사
 - [ ] 다른 Windows PC의 신규 설치 및 실게임 최종 확인
 - [ ] Roblox·Bedrock 최신 실게임 종단 검증
 - [ ] 신뢰된 코드 서명과 공개 Release

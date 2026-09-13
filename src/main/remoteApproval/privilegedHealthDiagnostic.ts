@@ -83,5 +83,21 @@ export function formatPrivilegedHealthDiagnostic(error: unknown): string {
   const code = typeof candidate.privilegedHealthCode === 'string' && codeSet.has(candidate.privilegedHealthCode)
     ? candidate.privilegedHealthCode
     : 'RUNTIME_INIT_FAILED'
-  return `${PREFIX} stage=${stage} code=${code}\n`
+  const message = error instanceof Error ? error.message : ''
+  const detail = message.startsWith('Protected policy selector')
+    ? `policy-selector${message.match(/win32=(-?\d+)/)?.[1] ? `-win32-${message.match(/win32=(-?\d+)/)![1]}` : ''}`
+    : message.startsWith('Protected local policy')
+      ? 'local-policy'
+      : message.startsWith('Protected accounting')
+        ? 'accounting'
+        : message.startsWith('Protected usage')
+          ? 'usage'
+          : /EACCES|EPERM|access denied/i.test(message)
+            ? 'filesystem-access'
+            : /ENOENT|not found/i.test(message)
+              ? 'filesystem-missing'
+              : message.includes('named-pipe')
+                ? 'named-pipe'
+                : null
+  return `${PREFIX} stage=${stage} code=${code}${detail ? ` detail=${detail}` : ''}\n`
 }

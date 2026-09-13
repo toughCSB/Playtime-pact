@@ -87,17 +87,17 @@ describe('packaged Playtime Pact identity surfaces', () => {
     const script = [
       "$p=(Resolve-Path 'dist/win-unpacked/Playtime Pact.exe').Path",
       "$v=(Get-Item -LiteralPath $p).VersionInfo",
-      "[pscustomobject]@{ ProductName=$v.ProductName; FileDescription=$v.FileDescription; InternalName=$v.InternalName; OriginalFilename=$v.OriginalFilename } | ConvertTo-Json -Compress",
+      "Write-Output ($v.ProductName + '|' + $v.FileDescription + '|' + $v.InternalName + '|' + $v.OriginalFilename)",
     ].join('; ')
     const raw = execFileSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       encoding: 'utf8',
       windowsHide: true,
     }).trim()
 
-    const metadata = JSON.parse(raw)
-    expect(metadata.ProductName).toBe('Playtime Pact')
-    expect(metadata.FileDescription).toBe('Playtime Pact')
-    expect(metadata.InternalName).toBe('Playtime Pact')
+    const [productName, fileDescription, internalName] = raw.split('|')
+    expect(productName).toBe('Playtime Pact')
+    expect(fileDescription).toBe('Playtime Pact')
+    expect(internalName).toBe('Playtime Pact')
   })
 
   it('creates new installer/runtime identity surfaces while failing closed on active legacy remnants', () => {
@@ -108,7 +108,8 @@ describe('packaged Playtime Pact identity surfaces', () => {
     expect(installerScript).toContain('WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "PlaytimePact"')
     expect(installerScript).toContain('schtasks /create /tn "PlaytimePact"')
     expect(installerScript).toContain('C:\\ProgramData\\PlaytimePact\\Admin\\admin-secret.json')
-    expect(installerScript).toContain('Playtime Pact - Uninstall')
+    expect(installerScript).toContain('resources\\PlaytimePactInstallerAuth.exe" --verify')
+    expect(installerScript).not.toContain('Microsoft.VisualBasic.Interaction')
     expect(installerScript).toContain('Legacy MyPact remnants are still active. Remove MyPact completely before installing Playtime Pact.')
     expect(installerScript).toContain('Get-ScheduledTask -TaskName $$_ -ErrorAction SilentlyContinue')
     expect(installerScript).toContain('Rfc2898DeriveBytes')
