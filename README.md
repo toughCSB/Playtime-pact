@@ -454,7 +454,7 @@ npm run package:win
 - [x] Roblox·Minecraft Java/Bedrock 및 Lunar Minecraft 감지
 - [x] Windows 보호 서비스와 부모 PIN 관리
 - [x] 정상 종료 요청·신원 재확인·강제 종료 fallback
-- [x] 0.61.0-rc.8 Windows 설치 후보와 설치 복구·게임 감지 회귀검사
+- [x] 0.61.0-rc.8 Windows 설치 후보, 설치 복구, 실제 Roblox 승인·타이머·만료 종료 검증
 - [ ] 다른 Windows PC의 신규 설치 및 실게임 최종 확인
 - [ ] Roblox·Bedrock 최신 실게임 종단 검증
 - [ ] 신뢰된 코드 서명과 공개 Release
