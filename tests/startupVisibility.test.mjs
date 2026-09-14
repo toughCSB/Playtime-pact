@@ -14,8 +14,8 @@ describe('startup window visibility', () => {
     expect(decideStartupWindowAction({ startHidden: true, resumedTimer: false })).toBe('hide-to-tray')
   })
 
-  it('treats packaged no-argument launches as tray-only for boot auto-start compatibility', () => {
-    expect(shouldStartHiddenFromLaunch({ argv: ['Playtime Pact.exe'], isPackaged: true })).toBe(true)
+  it('shows packaged no-argument launches so every user can open the installed app', () => {
+    expect(shouldStartHiddenFromLaunch({ argv: ['Playtime Pact.exe'], isPackaged: true })).toBe(false)
   })
 
   it('keeps local development launches visible unless explicitly hidden', () => {

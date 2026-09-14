@@ -16,6 +16,9 @@
   ${OrIf} $R7 == "0.61.0-rc.3"
   ${OrIf} $R7 == "0.61.0-rc.4"
   ${OrIf} $R7 == "0.61.0-rc.5"
+  ${OrIf} $R7 == "0.61.0-rc.6"
+  ${OrIf} $R7 == "0.61.0-rc.7"
+  ${OrIf} $R7 == "0.61.0-rc.8"
     InitPluginsDir
     SetOutPath "$PLUGINSDIR"
     File /oname=PlaytimePactInstallerAuth.exe "${PROJECT_DIR}\build\native\PlaytimePactInstallerAuth.exe"
@@ -55,7 +58,10 @@
     Abort
   ${EndIf}
   ; HKLM\Run: 모든 사용자 로그온 시 각자 세션에서 watchdog을 띄워 앱을 시작/재시작
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "PlaytimePact" 'wscript.exe //B //Nologo "$INSTDIR\resources\resources\start-watch-loop.vbs"'
+  ; Start the interactive timer directly for every signed-in user. Some managed
+  ; Windows accounts block WSH/VBS, which previously prevented the app from
+  ; appearing even though the machine-wide installation itself was present.
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "PlaytimePact" '"$INSTDIR\Playtime Pact.exe" --start-hidden'
   ; Scheduled Task: 관리자 세션용 HIGHEST watchdog 보조
   ExecWait 'schtasks /create /tn "PlaytimePact" /tr "wscript.exe //B //Nologo \"$INSTDIR\resources\resources\start-watch-loop.vbs\"" /sc onlogon /rl HIGHEST /delay 0000:10 /f'
   ExecWait `cmd.exe /c mkdir C:\ProgramData\PlaytimePact C:\ProgramData\PlaytimePact\Admin C:\ProgramData\PlaytimePact\Data 2>nul`

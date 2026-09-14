@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { execFileSync, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 
 import {
@@ -10,8 +10,14 @@ import {
   splitWindowsCommandLine,
 } from '../src/shared/managedGames'
 
-import { buildWindowsIdentityTerminationScript, buildWindowsProcessCaptureScript, buildWindowsTerminationArgs, normalizeProcessRecords } from '../src/main/managedGameRuntime'
+import { buildWindowsIdentityTerminationScript, buildWindowsProcessCaptureScript, buildWindowsTerminationArgs, captureNativeWindowsProcessRecords, normalizeProcessRecords, terminateNativeWindowsProcess } from '../src/main/managedGameRuntime'
 describe('managed game helpers', () => {
+  it('enumerates the current Windows session without PowerShell language-mode dependencies', () => {
+    if (process.platform !== 'win32') return
+    const records = captureNativeWindowsProcessRecords([`${process.title}.exe`, 'node.exe'])
+    expect(records.some((record) => Number(record.processId) === process.pid)).toBe(true)
+    expect(records.find((record) => Number(record.processId) === process.pid)?.processStartedAt).toBeGreaterThan(0)
+  })
   it('splits Windows command lines while preserving quoted arguments', () => {
     expect(splitWindowsCommandLine('"C:\\Program Files\\Minecraft\\MinecraftLauncher.exe" --workDir "C:\\Users\\Kid\\.minecraft"')).toEqual([
       'C:\\Program Files\\Minecraft\\MinecraftLauncher.exe',
@@ -178,22 +184,41 @@ describe('managed game helpers', () => {
     expect(classifyManagedGameProcess({ name: 'RobloxStudioBeta.exe', productName: 'Roblox Studio' })).toBeNull()
   })
 
-  it.skipIf(process.platform !== 'win32')('captures real CIM DateTime and refuses a changed process identity before terminating its own child', async () => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-Command', '[Console]::ReadLine()'], { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] })
+  it.skipIf(process.platform !== 'win32')('captures a real process start identity without PowerShell', async () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' })
     await once(child, 'spawn')
     const exited = once(child, 'exit')
     try {
-      const output = execFileSync('powershell.exe', ['-NoProfile', '-Command', buildWindowsProcessCaptureScript(['powershell.exe'])], { encoding: 'utf8', windowsHide: true })
-      const record = normalizeProcessRecords(JSON.parse(output)).find((entry) => Number(entry.processId) === child.pid)
+      const record = captureNativeWindowsProcessRecords(['node.exe']).find((entry) => Number(entry.processId) === child.pid)
       expect(record?.processStartedAt).toBeGreaterThan(Date.now() - 60_000)
       expect(record?.processStartedAt).toBeLessThanOrEqual(Date.now())
-      const identity = { pid: child.pid, imageName: record.name, processStartedAt: record.processStartedAt, gameId: 'roblox' }
-      expect(() => execFileSync('powershell.exe', ['-NoProfile', '-Command', buildWindowsIdentityTerminationScript({ ...identity, processStartedAt: identity.processStartedAt - 1 })], { windowsHide: true, stdio: 'pipe' })).toThrow()
-      expect(child.exitCode).toBeNull()
-      execFileSync('powershell.exe', ['-NoProfile', '-Command', buildWindowsIdentityTerminationScript(identity, 10000, 0)], { windowsHide: true, stdio: 'pipe' })
-      await exited
+      expect(record?.executablePath?.toLowerCase()).toBe(process.execPath.toLowerCase())
     } finally {
-      if (child.exitCode === null) { child.kill(); await exited }
+      child.kill()
+      await exited
     }
   }, 20_000)
+
+  it.skipIf(process.platform !== 'win32')('terminates only the native process identity that was verified', async () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' })
+    await once(child, 'spawn')
+    const exited = once(child, 'exit')
+    const record = captureNativeWindowsProcessRecords(['node.exe']).find((entry) => Number(entry.processId) === child.pid)
+    expect(record?.processStartedAt).toBeGreaterThan(0)
+    const identity = {
+      gameId: 'minecraft',
+      pid: child.pid,
+      processStartedAt: record.processStartedAt,
+      imageName: 'node.exe',
+    }
+    try {
+      await expect(terminateNativeWindowsProcess({ ...identity, processStartedAt: identity.processStartedAt - 1 })).rejects.toThrow('Process identity changed')
+      expect(child.exitCode).toBeNull()
+      await terminateNativeWindowsProcess(identity)
+      await exited
+      expect(child.exitCode).not.toBeNull()
+    } finally {
+      if (child.exitCode === null) child.kill()
+    }
+  }, 30_000)
 })

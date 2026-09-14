@@ -15,7 +15,7 @@ export function shouldStartHiddenFromLaunch(options: {
   const flags = new Set(options.argv.map(arg => arg.toLowerCase()))
   if (flags.has('--show-main')) return false
   if ([...flags].some(arg => HIDDEN_LAUNCH_FLAGS.has(arg))) return true
-  return options.isPackaged
+  return false
 }
 
 export function decideStartupWindowAction(options: {

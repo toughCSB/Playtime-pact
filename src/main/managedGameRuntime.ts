@@ -1,4 +1,5 @@
 import { exec, execFile } from 'child_process'
+import koffi from 'koffi'
 import {
   collectManagedGameSnapshot,
   getManagedGameProcessImageNames,
@@ -9,6 +10,100 @@ import {
 
 function emptySnapshot(): ManagedGameSnapshot {
   return { activeGameIds: [], classifiedProcesses: [], launchCommands: [] }
+}
+
+const windowsKernel32 = process.platform === 'win32' ? koffi.load('kernel32.dll') : null
+const WindowsProcessEntry32 = process.platform === 'win32'
+  ? koffi.struct('PPT_MANAGED_PROCESSENTRY32W', {
+      dwSize: 'uint32_t', cntUsage: 'uint32_t', th32ProcessID: 'uint32_t', th32DefaultHeapID: 'uintptr_t',
+      th32ModuleID: 'uint32_t', cntThreads: 'uint32_t', th32ParentProcessID: 'uint32_t', pcPriClassBase: 'int32_t',
+      dwFlags: 'uint32_t', szExeFile: 'char16_t[260]',
+    })
+  : null
+const WindowsFileTime = process.platform === 'win32'
+  ? koffi.struct('PPT_MANAGED_FILETIME', { dwLowDateTime: 'uint32_t', dwHighDateTime: 'uint32_t' })
+  : null
+const CreateToolhelp32Snapshot = windowsKernel32 && windowsKernel32.func('void * __stdcall CreateToolhelp32Snapshot(uint32_t Flags, uint32_t ProcessId)')
+const Process32FirstW = windowsKernel32 && windowsKernel32.func('bool __stdcall Process32FirstW(void * Snapshot, _Inout_ PPT_MANAGED_PROCESSENTRY32W * Entry)')
+const Process32NextW = windowsKernel32 && windowsKernel32.func('bool __stdcall Process32NextW(void * Snapshot, _Inout_ PPT_MANAGED_PROCESSENTRY32W * Entry)')
+const ProcessIdToSessionId = windowsKernel32 && windowsKernel32.func('bool __stdcall ProcessIdToSessionId(uint32_t ProcessId, uint32_t * SessionId)')
+const OpenProcess = windowsKernel32 && windowsKernel32.func('void * __stdcall OpenProcess(uint32_t Access, bool Inherit, uint32_t ProcessId)')
+const QueryFullProcessImageNameW = windowsKernel32 && windowsKernel32.func('bool __stdcall QueryFullProcessImageNameW(void * Process, uint32_t Flags, uint16_t * Name, uint32_t * Size)')
+const GetProcessTimes = windowsKernel32 && WindowsFileTime && windowsKernel32.func('bool __stdcall GetProcessTimes(void * Process, _Out_ PPT_MANAGED_FILETIME * Creation, _Out_ PPT_MANAGED_FILETIME * Exit, _Out_ PPT_MANAGED_FILETIME * Kernel, _Out_ PPT_MANAGED_FILETIME * User)')
+const CloseHandle = windowsKernel32 && windowsKernel32.func('bool __stdcall CloseHandle(void * Handle)')
+
+const invalidWindowsHandle = (handle: unknown) => !handle || handle === -1n || handle === 0xffffffffffffffffn || handle === 0xffffffffn
+
+function windowsSessionId(processId: number): number | null {
+  if (!ProcessIdToSessionId) return null
+  const session = Buffer.alloc(4)
+  return ProcessIdToSessionId(processId, session) ? session.readUInt32LE(0) : null
+}
+
+function windowsProcessDetails(processId: number): Pick<ManagedProcessRecord, 'processStartedAt' | 'executablePath' | 'commandLine'> {
+  if (!OpenProcess || !QueryFullProcessImageNameW || !GetProcessTimes || !CloseHandle) return {}
+  const handle = OpenProcess(0x1000, false, processId)
+  if (invalidWindowsHandle(handle)) return {}
+  try {
+    const pathBuffer = Buffer.alloc(32768)
+    const pathLength = Buffer.alloc(4)
+    pathLength.writeUInt32LE(16384)
+    const executablePath = QueryFullProcessImageNameW(handle, 0, pathBuffer, pathLength)
+      ? pathBuffer.subarray(0, pathLength.readUInt32LE(0) * 2).toString('utf16le').replace(/\0+$/, '')
+      : undefined
+    const creation = {} as { dwLowDateTime?: number; dwHighDateTime?: number }
+    const exited = {}
+    const kernel = {}
+    const user = {}
+    let processStartedAt: number | undefined
+    if (GetProcessTimes(handle, creation, exited, kernel, user)
+      && Number.isInteger(creation.dwLowDateTime) && Number.isInteger(creation.dwHighDateTime)) {
+      const ticks = (BigInt(creation.dwHighDateTime!) << 32n) | BigInt(creation.dwLowDateTime!)
+      const unixMilliseconds = (ticks - 116444736000000000n) / 10000n
+      const value = Number(unixMilliseconds)
+      if (Number.isSafeInteger(value) && value > 0) processStartedAt = value
+    }
+    return {
+      ...(executablePath ? { executablePath, commandLine: `"${executablePath}"` } : {}),
+      ...(processStartedAt ? { processStartedAt } : {}),
+    }
+  } finally {
+    CloseHandle(handle)
+  }
+}
+
+export function captureNativeWindowsProcessRecords(processNames: readonly string[]): ManagedProcessRecord[] {
+  if (!CreateToolhelp32Snapshot || !Process32FirstW || !Process32NextW || !CloseHandle || !WindowsProcessEntry32) {
+    throw new Error('Native Windows process enumeration unavailable')
+  }
+  const currentSessionId = windowsSessionId(process.pid)
+  if (currentSessionId === null) throw new Error('Current Windows session identity unavailable')
+  const wanted = new Set(processNames.map((name) => name.toLowerCase()))
+  const snapshot = CreateToolhelp32Snapshot(0x00000002, 0)
+  if (invalidWindowsHandle(snapshot)) throw new Error('Windows process snapshot unavailable')
+  try {
+    const records: ManagedProcessRecord[] = []
+    const entry = { dwSize: koffi.sizeof(WindowsProcessEntry32) } as {
+      dwSize: number
+      th32ProcessID?: number
+      szExeFile?: string
+    }
+    for (let found = Process32FirstW(snapshot, entry); found; found = Process32NextW(snapshot, entry)) {
+      const processId = Number(entry.th32ProcessID)
+      const name = typeof entry.szExeFile === 'string' ? entry.szExeFile.trim() : ''
+      if (!Number.isInteger(processId) || processId <= 0 || !wanted.has(name.toLowerCase())) {
+        entry.dwSize = koffi.sizeof(WindowsProcessEntry32)
+        continue
+      }
+      if (windowsSessionId(processId) === currentSessionId) {
+        records.push({ processId, name, ...windowsProcessDetails(processId) })
+      }
+      entry.dwSize = koffi.sizeof(WindowsProcessEntry32)
+    }
+    return records
+  } finally {
+    CloseHandle(snapshot)
+  }
 }
 
 export interface ManagedGameTerminationResult {
@@ -59,8 +154,43 @@ export function buildWindowsIdentityTerminationScript(process: ClassifiedManaged
   ].join('; ')
 }
 
-async function runIdentityTermination(process: ClassifiedManagedGameProcess): Promise<void> {
-  await runManagedProcessCapture(buildWindowsIdentityTerminationScript(process), 80000)
+function sameNativeWindowsProcess(process: ClassifiedManagedGameProcess): ManagedProcessRecord | null {
+  if (!process.processStartedAt) return null
+  const record = captureNativeWindowsProcessRecords([process.imageName])
+    .find((candidate) => Number(candidate.processId) === process.pid)
+  return record
+    && record.name?.toLowerCase() === process.imageName.toLowerCase()
+    && Number(record.processStartedAt) === process.processStartedAt
+    ? record
+    : null
+}
+
+function runTaskkill(args: string[], timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('taskkill.exe', args, { windowsHide: true, timeout: timeoutMs }, (error) => {
+      if (error) reject(new Error('Managed process termination failed'))
+      else resolve()
+    })
+  })
+}
+
+async function waitForNativeWindowsProcessExit(process: ClassifiedManagedGameProcess, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!sameNativeWindowsProcess(process)) return true
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return !sameNativeWindowsProcess(process)
+}
+
+export async function terminateNativeWindowsProcess(process: ClassifiedManagedGameProcess): Promise<void> {
+  if (!process.processStartedAt || !sameNativeWindowsProcess(process)) throw new Error('Process identity changed')
+  try { await runTaskkill(['/PID', String(process.pid), '/T'], 15000) } catch {}
+  if (await waitForNativeWindowsProcessExit(process, 10000)) return
+  // Re-check PID, image and creation time immediately before the forced fallback.
+  if (!sameNativeWindowsProcess(process)) return
+  try { await runTaskkill(['/PID', String(process.pid), '/T', '/F'], 15000) } catch {}
+  if (!await waitForNativeWindowsProcessExit(process, 5000)) throw new Error('Process termination timed out')
 }
 
 export function normalizeProcessRecords(value: unknown): ManagedProcessRecord[] {
@@ -107,10 +237,8 @@ async function captureManagedGameSnapshot(): Promise<ManagedGameCaptureResult> {
   if (processNames.length === 0) return { snapshot: emptySnapshot(), succeeded: true }
 
   try {
-    const script = buildWindowsProcessCaptureScript(processNames)
-    const stdout = (await runManagedProcessCapture(script)).trim()
-    const parsed = stdout ? JSON.parse(stdout) : []
-    return { snapshot: collectManagedGameSnapshot(normalizeProcessRecords(parsed)), succeeded: true }
+    const records = captureNativeWindowsProcessRecords(processNames)
+    return { snapshot: collectManagedGameSnapshot(records), succeeded: true }
   } catch {
     // Child-process errors can contain stdout and unrelated command-line secrets.
     console.error('managed-game snapshot capture failed; process state unavailable')
@@ -170,7 +298,7 @@ async function terminateSupportedGamesOnce(retries: number): Promise<ManagedGame
     let snapshot = capture.snapshot
 
     for (let attempt = 0; attempt < attempts && capture.succeeded && snapshot.activeGameIds.length > 0; attempt++) {
-      await Promise.allSettled(snapshot.classifiedProcesses.map((process) => runIdentityTermination(process)))
+      await Promise.allSettled(snapshot.classifiedProcesses.map((process) => terminateNativeWindowsProcess(process)))
       capture = await captureManagedGameSnapshot()
       snapshot = capture.snapshot
     }

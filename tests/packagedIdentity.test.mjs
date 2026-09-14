@@ -28,6 +28,8 @@ describe('packaged Playtime Pact identity surfaces', () => {
     expect(builderConfig).toContain("productName: 'Playtime Pact'")
     expect(builderConfig).toContain("executableName: 'Playtime Pact'")
     expect(builderConfig).toContain("shortcutName: 'Playtime Pact'")
+    expect(builderConfig).toContain("createDesktopShortcut: 'always'")
+    expect(packageJson.build.nsis.createDesktopShortcut).toBe('always')
     expect(builderConfig).toContain("uninstallDisplayName: 'Playtime Pact'")
     expect(builderConfig).not.toContain("appId: 'com.mypact.myfuture'")
   })
@@ -106,6 +108,8 @@ describe('packaged Playtime Pact identity surfaces', () => {
     const customInstall = installerScript.slice(customInstallStart, customInstallEnd)
 
     expect(installerScript).toContain('WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "PlaytimePact"')
+    expect(installerScript).toContain('\'"$INSTDIR\\Playtime Pact.exe" --start-hidden\'')
+    expect(installerScript).not.toContain('WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "PlaytimePact" \'wscript.exe')
     expect(installerScript).toContain('schtasks /create /tn "PlaytimePact"')
     expect(installerScript).toContain('C:\\ProgramData\\PlaytimePact\\Admin\\admin-secret.json')
     expect(installerScript).toContain('resources\\PlaytimePactInstallerAuth.exe" --verify')

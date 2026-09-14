@@ -2,7 +2,7 @@
 
 > **부모와 자녀가 함께 정한 Roblox·Minecraft 게임 시간을 눈에 보이게 만들고, 자녀가 스스로 약속을 지키도록 돕는 Windows 데스크톱 타이머 앱**
 
-[![Version](https://img.shields.io/badge/version-0.61.0--rc.7-blue)](RELEASE_NOTES_0.61.0.md)
+[![Version](https://img.shields.io/badge/version-0.61.0--rc.8-blue)](RELEASE_NOTES_0.61.0.md)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)](#-설치-및-실행)
 [![Games](https://img.shields.io/badge/games-Roblox%20%7C%20Minecraft%20%7C%20Lunar-45b97c)](#-지원-게임)
 [![License](https://img.shields.io/badge/license-MIT-green)](#-라이선스)
@@ -11,17 +11,17 @@
 
 ## ⚠️ Windows 설치 전 꼭 읽어주세요
 
-현재 Windows 0.61.0-rc.7 설치 후보는 **공인 코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen, Smart App Control 또는 조직의 App Control 정책이 실행을 경고하거나 완전히 차단할 수 있습니다.
+현재 Windows 0.61.0-rc.8 설치 후보는 **공인 코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen, Smart App Control 또는 조직의 App Control 정책이 실행을 경고하거나 완전히 차단할 수 있습니다.
 
 1. 반드시 신뢰할 수 있는 경로로 받은 설치 파일인지 확인합니다.
-2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 0.61.0-rc.7.exe`를 실행합니다.
+2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 0.61.0-rc.8.exe`를 실행합니다.
 3. 보호 서비스 설치를 위한 Windows 관리자 승인창은 부모가 직접 확인하고 승인합니다.
 4. 신규 설치의 초기 부모 PIN은 `0000`입니다. 설치 직후 관리자 화면의 **부모 PIN 변경**에서 바꿔 주세요.
 5. 첫 사용은 부모 입회하에 짧은 허용 시간으로 감지·경고·종료 동작을 확인합니다.
 
 Smart App Control에는 개별 앱 예외가 없습니다. 공개 배포에서는 CA가 발급한 신뢰된 인증서, Microsoft Store 서명 또는 자격을 충족한 오픈소스 서명 서비스를 사용해야 합니다. 로컬 자체 서명이나 unsigned 빌드는 다른 PC의 차단을 해소하지 못합니다. 보안 기능 해제를 일반 설치 방법으로 안내하지 않습니다. 자세한 내용은 [Windows 설치 안내](WINDOWS_INSTALL.md)를 확인하세요.
 
-> 0.61.0-rc.7은 부모님 관리 동선, 로컬 승인, PIN 검증과 보호 서비스·구버전 파일 잠금 복구를 개선한 미서명 테스트 릴리스입니다. 설치 인증 로직과 신뢰된 배포자 서명은 서로 다른 문제이며, 현재 남은 공개 배포 차단 요인은 코드 서명입니다.
+> 0.61.0-rc.8은 Windows 제한 언어 정책에서도 동작하는 Roblox/Minecraft 네이티브 감지, 사용자 세션 분리, 모든 사용자용 바로가기를 추가한 미서명 테스트 릴리스입니다. 설치 인증 로직과 신뢰된 배포자 서명은 서로 다른 문제이며, 현재 남은 공개 배포 차단 요인은 코드 서명입니다.
 
 ---
 
@@ -202,7 +202,7 @@ Badlion, Feather, Prism Launcher 등 여러 Minecraft 실행 환경을 식별하
 
 - 일반 창 닫기 또는 `Alt+F4`는 앱 종료 대신 트레이 숨김
 - 게임 중 오버레이는 항상 위에 표시하고 작업 표시줄에서 숨김
-- HKLM Run과 Windows Scheduled Task로 사용자 로그인 후 자동 시작 지원
+- HKLM Run에서 앱을 직접 실행해 Windows 스크립트가 차단된 표준 계정에서도 로그인 후 자동 시작 지원
 - `PlaytimePactPrivilegedBroker` Windows 서비스가 SYSTEM 권한에서 보호된 사용량을 관리
 - 서비스와 Electron 앱 사이의 IPC readiness 검사가 실패하면 보호 기능을 정상으로 가장하지 않음
 - 표준 자녀 Windows 계정 사용을 권장
@@ -234,7 +234,16 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 
 ---
 
-## ✅ v0.61.0-rc.7 설치·보호 복구 변경 요약
+## ✅ v0.61.0-rc.8 설치·보호 복구 변경 요약
+
+- 게임 프로세스 감지를 PowerShell/CIM에서 Windows 네이티브 API로 교체해 제한 언어 모드에서도 Roblox와 Minecraft 감지
+- 게임 종료도 PowerShell에 의존하지 않고 PID·실행 파일·시작시각을 재검증한 뒤 정상 종료와 강제 종료 순서로 처리
+- 현재 로그인한 Windows 세션의 게임만 감지해 다른 계정의 게임을 잘못 계산하거나 차단하지 않도록 분리
+- 수동 실행은 메인 화면을 표시하고, 자동 실행만 트레이에 숨김
+- 모든 사용자 바탕 화면에 Playtime Pact 바로가기를 생성하도록 설치 설정 변경
+- PC 전체 자동 실행은 HKLM에서 앱을 직접 시작해 WSH/VBS 실행이 제한된 표준 계정에서도 타이머 백그라운드 실행
+
+### v0.61.0-rc.7 설치·보호 복구
 
 - `0.60.8`과 이전 `0.61.0-rc` 설치본의 제거 PIN 경로를 네이티브 검사기로 전환
 - SYSTEM 전용 `admin-secret.json`을 관리자 프로세스에서 직접 열지 않고, 임시 LocalSystem 서비스와 보호된 named pipe를 통해 PIN 일치 여부만 확인
@@ -282,7 +291,7 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 
 ## 검증 상태
 
-최신 0.61.0-rc.7의 상세 기능 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요. 아래 표는 0.60.8 전체 회귀검사 기록이며, rc.7 설치 복구의 추가 확인 결과는 위에 정리했습니다.
+최신 0.61.0-rc.8의 상세 기능 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요. 아래 표는 0.60.8 전체 회귀검사 기록이며, rc.7 설치 복구와 rc.8 다중 사용자·게임 감지 결과는 위에 정리했습니다.
 
 2026-09-09 Windows 0.60.8 후보 기준입니다.
 
@@ -307,7 +316,7 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 - Android 실기기·FCM 운영·원격 서버 배포
 - macOS 설치 및 동작
 
-자동 테스트 통과는 실기기에서 모든 조합이 정상이라는 뜻이 아닙니다. 위 한계를 유지한 채 Windows 0.61.0-rc.7 설치 후보로 관리합니다.
+자동 테스트 통과는 실기기에서 모든 조합이 정상이라는 뜻이 아닙니다. 위 한계를 유지한 채 Windows 0.61.0-rc.8 설치 후보로 관리합니다.
 
 ---
 
@@ -419,6 +428,7 @@ npm run package:win
 
 | 버전 | 날짜 | 주요 변경 |
 |---|---|---|
+| **v0.61.0-rc.8** | 2026-09-15 | 제한 언어 모드용 네이티브 게임 감지, 사용자 세션 분리, 수동 실행 화면 표시, 모든 사용자 바탕 화면 바로가기 |
 | **v0.61.0-rc.7** | 2026-09-13 | rc.2~rc.5 구버전 제거기를 우회하는 승인된 in-place 업그레이드와 감시 프로세스 종료 대기 보강 |
 | **v0.61.0-rc.6** | 2026-09-13 | 네이티브 PIN 검증·복구, 구버전 검사기 교체, 보호 파일 ACL 자동 복구, 서비스 제거·readiness 진단 보강 |
 | **v0.61.0-rc.1** | 2026-09-13 | 창 드래그 이동, 실시간 일일 허용량, 0회 설정, PC 부모 PIN 승인, 관리자·간편 시간 추가 UI 개편 |
@@ -444,7 +454,7 @@ npm run package:win
 - [x] Roblox·Minecraft Java/Bedrock 및 Lunar Minecraft 감지
 - [x] Windows 보호 서비스와 부모 PIN 관리
 - [x] 정상 종료 요청·신원 재확인·강제 종료 fallback
-- [x] 0.61.0-rc.7 Windows 설치 후보와 설치 복구 회귀검사
+- [x] 0.61.0-rc.8 Windows 설치 후보와 설치 복구·게임 감지 회귀검사
 - [ ] 다른 Windows PC의 신규 설치 및 실게임 최종 확인
 - [ ] Roblox·Bedrock 최신 실게임 종단 검증
 - [ ] 신뢰된 코드 서명과 공개 Release

@@ -75,7 +75,7 @@ module.exports = {
     oneClick: true,
     perMachine: true,
     include: 'build/installer.nsh',
-    createDesktopShortcut: false,
+    createDesktopShortcut: 'always',
     createStartMenuShortcut: true,
     shortcutName: 'Playtime Pact',
     deleteAppDataOnUninstall: false,
