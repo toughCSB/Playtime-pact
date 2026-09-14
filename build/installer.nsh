@@ -19,6 +19,7 @@
   ${OrIf} $R7 == "0.61.0-rc.6"
   ${OrIf} $R7 == "0.61.0-rc.7"
   ${OrIf} $R7 == "0.61.0-rc.8"
+  ${OrIf} $R7 == "0.61.0-rc.9"
     InitPluginsDir
     SetOutPath "$PLUGINSDIR"
     File /oname=PlaytimePactInstallerAuth.exe "${PROJECT_DIR}\build\native\PlaytimePactInstallerAuth.exe"

@@ -2,6 +2,7 @@ import type { ManagedGameId } from './types'
 
 export interface ManagedProcessRecord {
   processId?: number | string | null
+  parentProcessId?: number | string | null
   processStartedAt?: number | string | null
   name?: string | null
   executablePath?: string | null
@@ -66,6 +67,20 @@ const MINECRAFT_COMMAND_HINTS = [
   'forge',
 ] as const
 
+const MINECRAFT_LAUNCHER_IMAGES = new Set([
+  'minecraftlauncher.exe',
+  'lunar client.exe',
+  'lunar client (qt5).exe',
+  'badlion client.exe',
+  'badlionclient.exe',
+  'feather client.exe',
+  'prismlauncher.exe',
+  'multimc.exe',
+  'polymc.exe',
+  'hmcl.exe',
+  'pcl2.exe',
+])
+
 // Installers, Studio and crash reporting belong to Roblox but are not game sessions.
 // Check original filenames too: shared ProductName metadata must not promote them.
 const ROBLOX_NON_GAME_IMAGES = new Set([
@@ -108,7 +123,10 @@ export function getManagedGameDisplayName(gameId: ManagedGameId): string {
 }
 
 export function getManagedGameProcessImageNames(): string[] {
-  return Array.from(new Set(Object.values(MANAGED_GAME_IMAGE_HINTS).flat()))
+  return Array.from(new Set([
+    ...Object.values(MANAGED_GAME_IMAGE_HINTS).flat(),
+    ...MINECRAFT_LAUNCHER_IMAGES,
+  ]))
 }
 
 export function normalizeManagedGameIds(gameIds: readonly ManagedGameId[] | null | undefined): ManagedGameId[] {
@@ -128,7 +146,7 @@ export function classifyManagedGameProcess(record: ManagedProcessRecord): Manage
   const productName = normalizeText(record.productName)
   const searchable = `${executablePath}\n${commandLine}`
 
-  if (name === 'minecraftlauncher.exe' || name === 'lunar client.exe' || name === 'lunar client (qt5).exe') return null
+  if (MINECRAFT_LAUNCHER_IMAGES.has(name)) return null
   if (ROBLOX_NON_GAME_IMAGES.has(name) || ROBLOX_NON_GAME_IMAGES.has(originalFilename)) return null
   if (MANAGED_GAME_IMAGE_HINTS.roblox.includes(name) || MANAGED_GAME_IMAGE_HINTS.roblox.includes(originalFilename)) return 'roblox'
   if (productName === 'roblox' || productName === 'roblox player') return 'roblox'
@@ -166,21 +184,43 @@ export function collectManagedGameSnapshot(records: readonly ManagedProcessRecor
   const launchCommandKeys = new Set<string>()
   const classifiedPids = new Set<number>()
 
+  const recordsByPid = new Map<number, ManagedProcessRecord>()
   for (const record of records) {
-    const gameId = classifyManagedGameProcess(record)
+    const pid = Number(record.processId)
+    if (Number.isInteger(pid) && pid > 0) recordsByPid.set(pid, record)
+  }
+
+  const hasMinecraftLauncherAncestor = (record: ManagedProcessRecord): boolean => {
+    const visited = new Set<number>()
+    let parentPid = Number(record.parentProcessId)
+    for (let depth = 0; depth < 12 && Number.isInteger(parentPid) && parentPid > 0 && !visited.has(parentPid); depth++) {
+      visited.add(parentPid)
+      const parent = recordsByPid.get(parentPid)
+      if (!parent) return false
+      if (MINECRAFT_LAUNCHER_IMAGES.has(normalizeText(parent.name))) return true
+      parentPid = Number(parent.parentProcessId)
+    }
+    return false
+  }
+
+  for (const record of records) {
+    const imageName = normalizeText(record.name)
+    const originalFilename = normalizeText(record.originalFilename)
+    const isJava = ['java.exe', 'javaw.exe'].includes(imageName) || ['java.exe', 'javaw.exe'].includes(originalFilename)
+    const gameId = classifyManagedGameProcess(record) ?? (isJava && hasMinecraftLauncherAncestor(record) ? 'minecraft' : null)
     if (!gameId) continue
 
     if (!activeGameIds.includes(gameId)) activeGameIds.push(gameId)
 
     const pid = Number(record.processId)
     const processStartedAt = Number(record.processStartedAt)
-    const imageName = typeof record.name === 'string' ? record.name.trim() : ''
-    if (Number.isInteger(pid) && pid > 0 && imageName && !classifiedPids.has(pid)) {
+    const displayImageName = typeof record.name === 'string' ? record.name.trim() : ''
+    if (Number.isInteger(pid) && pid > 0 && displayImageName && !classifiedPids.has(pid)) {
       classifiedPids.add(pid)
       classifiedProcesses.push({
         gameId,
         pid,
-        imageName,
+        imageName: displayImageName,
         processStartedAt: Number.isFinite(processStartedAt) && processStartedAt > 0 ? processStartedAt : undefined,
       })
     }

@@ -7,22 +7,16 @@ afterEach(() => { vi.useRealTimers(); vi.resetAllMocks() })
 
 describe('non-blocking managed process capture', () => {
   it.skipIf(process.platform !== 'win32')('shares shutdown across concurrent callers and releases the operation afterwards', async () => {
-    const calls: Function[] = []
-    vi.mocked(execFile).mockImplementation((...args: any[]) => {
-      calls.push(args.at(-1)); return { kill: vi.fn() } as any
-    })
     const first = terminateSupportedGames()
     const second = terminateSupportedGames()
     expect(second).toBe(first)
     expect(isManagedGameTerminationInFlight()).toBe(true)
-    expect(calls).toHaveLength(1)
-    calls[0](null, '[]')
     expect(await first).toEqual({ success: true, remainingGameIds: [] })
     expect(isManagedGameTerminationInFlight()).toBe(false)
     const next = terminateSupportedGames()
     expect(next).not.toBe(first)
-    calls[1](null, '[]')
-    await next
+    expect(await next).toEqual({ success: true, remainingGameIds: [] })
+    expect(execFile).not.toHaveBeenCalled()
   })
 
   it('lets the countdown reach expiry even when a child never closes, then ignores late output', async () => {

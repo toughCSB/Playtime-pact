@@ -4,6 +4,14 @@ Playtime Pact의 새 저장소 기준 변경 사항을 기록합니다.
 
 ## [Unreleased]
 
+## [0.61.0-rc.9] — 2026-09-15
+
+- Windows 네이티브 API로 Java의 실제 실행 명령을 읽어 공용 Java 경로로 실행되는 Minecraft도 식별합니다.
+- 실행 명령을 읽지 못하는 경우 Minecraft/Lunar 런처의 자식 Java 프로세스를 추적하는 보조 감지를 추가했습니다.
+- Lunar·Minecraft·Badlion·Feather·Prism 등 런처 창만 열린 상태는 게임 시간으로 계산하지 않고 실제 Java 게임 프로세스만 관리합니다.
+- 표준 계정 AppLocker 환경에서 기존 Store·MSI 설치 차단을 유지하면서 설치된 Lunar/Minecraft Java 런타임만 허용하는 관리자 도구를 추가했습니다.
+- 이 PC의 `joonw` 계정에서 차단되던 Lunar Java 17·21·25 런타임 6개를 게시자·제품·파일명·주 버전 기준으로 허용하고 정책 결과를 재검증했습니다.
+
 ## [0.61.0-rc.8] — 2026-09-15
 
 - 제한 언어 모드에서 실패하던 PowerShell/CIM 게임 감지를 Windows 네이티브 프로세스 API로 교체했습니다.

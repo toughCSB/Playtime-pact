@@ -34,6 +34,14 @@ describe('managed game helpers', () => {
     })).toBe('minecraft')
   })
 
+  it('reads the real native Windows command line instead of synthesizing the executable path', () => {
+    if (process.platform !== 'win32') return
+    const record = captureNativeWindowsProcessRecords([`${process.title}.exe`, 'node.exe'])
+      .find((entry) => Number(entry.processId) === process.pid)
+    expect(record?.commandLine).toContain(process.execPath)
+    expect(record?.commandLine).not.toBe(`"${process.execPath}"`)
+  })
+
   it('does not classify the vanilla launcher before a game process starts', () => {
     expect(classifyManagedGameProcess({
       name: 'MinecraftLauncher.exe',
@@ -70,6 +78,35 @@ describe('managed game helpers', () => {
     expect(snapshot.classifiedProcesses.map(({ pid }) => buildWindowsTerminationArgs(pid))).toEqual([
       ['/PID', '5102', '/T', '/F'],
     ])
+  })
+
+  it('classifies generic Java descended from a known Minecraft launcher when command-line access is unavailable', () => {
+    const snapshot = collectManagedGameSnapshot([
+      {
+        processId: 5201,
+        parentProcessId: 100,
+        name: 'Lunar Client.exe',
+        executablePath: 'C:\\Users\\Kid\\AppData\\Local\\Programs\\Lunar Client\\Lunar Client.exe',
+      },
+      {
+        processId: 5202,
+        parentProcessId: 5201,
+        processStartedAt: 1_700_000_000_202,
+        name: 'javaw.exe',
+        executablePath: 'C:\\Program Files\\Java\\bin\\javaw.exe',
+      },
+    ])
+
+    expect(snapshot.activeGameIds).toEqual(['minecraft'])
+    expect(snapshot.classifiedProcesses).toEqual([
+      { gameId: 'minecraft', pid: 5202, processStartedAt: 1_700_000_000_202, imageName: 'javaw.exe' },
+    ])
+  })
+
+  it('does not count supported third-party launchers as gameplay before Java starts', () => {
+    for (const name of ['Badlion Client.exe', 'Feather Client.exe', 'PrismLauncher.exe', 'MultiMC.exe', 'PolyMC.exe', 'HMCL.exe', 'PCL2.exe']) {
+      expect(classifyManagedGameProcess({ name, executablePath: `C:\\Games\\${name}` })).toBeNull()
+    }
   })
 
   it('collects distinct active games and deduplicated launch commands', () => {

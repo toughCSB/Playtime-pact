@@ -13,24 +13,32 @@ function emptySnapshot(): ManagedGameSnapshot {
 }
 
 const windowsKernel32 = process.platform === 'win32' ? koffi.load('kernel32.dll') : null
+const windowsNtdll = process.platform === 'win32' ? koffi.load('ntdll.dll') : null
 const WindowsProcessEntry32 = process.platform === 'win32'
-  ? koffi.struct('PPT_MANAGED_PROCESSENTRY32W', {
+  ? koffi.struct({
       dwSize: 'uint32_t', cntUsage: 'uint32_t', th32ProcessID: 'uint32_t', th32DefaultHeapID: 'uintptr_t',
       th32ModuleID: 'uint32_t', cntThreads: 'uint32_t', th32ParentProcessID: 'uint32_t', pcPriClassBase: 'int32_t',
       dwFlags: 'uint32_t', szExeFile: 'char16_t[260]',
     })
   : null
 const WindowsFileTime = process.platform === 'win32'
-  ? koffi.struct('PPT_MANAGED_FILETIME', { dwLowDateTime: 'uint32_t', dwHighDateTime: 'uint32_t' })
+  ? koffi.struct({ dwLowDateTime: 'uint32_t', dwHighDateTime: 'uint32_t' })
   : null
 const CreateToolhelp32Snapshot = windowsKernel32 && windowsKernel32.func('void * __stdcall CreateToolhelp32Snapshot(uint32_t Flags, uint32_t ProcessId)')
-const Process32FirstW = windowsKernel32 && windowsKernel32.func('bool __stdcall Process32FirstW(void * Snapshot, _Inout_ PPT_MANAGED_PROCESSENTRY32W * Entry)')
-const Process32NextW = windowsKernel32 && windowsKernel32.func('bool __stdcall Process32NextW(void * Snapshot, _Inout_ PPT_MANAGED_PROCESSENTRY32W * Entry)')
+const Process32FirstW = windowsKernel32 && WindowsProcessEntry32 && windowsKernel32.func('Process32FirstW', 'bool', ['void *', koffi.inout(koffi.pointer(WindowsProcessEntry32))])
+const Process32NextW = windowsKernel32 && WindowsProcessEntry32 && windowsKernel32.func('Process32NextW', 'bool', ['void *', koffi.inout(koffi.pointer(WindowsProcessEntry32))])
 const ProcessIdToSessionId = windowsKernel32 && windowsKernel32.func('bool __stdcall ProcessIdToSessionId(uint32_t ProcessId, uint32_t * SessionId)')
 const OpenProcess = windowsKernel32 && windowsKernel32.func('void * __stdcall OpenProcess(uint32_t Access, bool Inherit, uint32_t ProcessId)')
 const QueryFullProcessImageNameW = windowsKernel32 && windowsKernel32.func('bool __stdcall QueryFullProcessImageNameW(void * Process, uint32_t Flags, uint16_t * Name, uint32_t * Size)')
-const GetProcessTimes = windowsKernel32 && WindowsFileTime && windowsKernel32.func('bool __stdcall GetProcessTimes(void * Process, _Out_ PPT_MANAGED_FILETIME * Creation, _Out_ PPT_MANAGED_FILETIME * Exit, _Out_ PPT_MANAGED_FILETIME * Kernel, _Out_ PPT_MANAGED_FILETIME * User)')
+const GetProcessTimes = windowsKernel32 && WindowsFileTime && windowsKernel32.func('GetProcessTimes', 'bool', [
+  'void *',
+  koffi.out(koffi.pointer(WindowsFileTime)),
+  koffi.out(koffi.pointer(WindowsFileTime)),
+  koffi.out(koffi.pointer(WindowsFileTime)),
+  koffi.out(koffi.pointer(WindowsFileTime)),
+])
 const CloseHandle = windowsKernel32 && windowsKernel32.func('bool __stdcall CloseHandle(void * Handle)')
+const NtQueryInformationProcess = windowsNtdll && windowsNtdll.func('int32_t __stdcall NtQueryInformationProcess(void * ProcessHandle, uint32_t ProcessInformationClass, void * ProcessInformation, uint32_t ProcessInformationLength, uint32_t * ReturnLength)')
 
 const invalidWindowsHandle = (handle: unknown) => !handle || handle === -1n || handle === 0xffffffffffffffffn || handle === 0xffffffffn
 
@@ -38,6 +46,31 @@ function windowsSessionId(processId: number): number | null {
   if (!ProcessIdToSessionId) return null
   const session = Buffer.alloc(4)
   return ProcessIdToSessionId(processId, session) ? session.readUInt32LE(0) : null
+}
+
+function windowsProcessCommandLine(handle: unknown): string | undefined {
+  if (!NtQueryInformationProcess) return undefined
+  const requiredLength = Buffer.alloc(4)
+  NtQueryInformationProcess(handle, 60, null, 0, requiredLength)
+  const byteLength = requiredLength.readUInt32LE(0)
+  if (byteLength < 16 || byteLength > 1024 * 1024) return undefined
+
+  const output = Buffer.alloc(byteLength + 2)
+  const status = NtQueryInformationProcess(handle, 60, output, output.length, requiredLength)
+  if (status < 0) return undefined
+
+  const stringByteLength = output.readUInt16LE(0)
+  const pointerOffset = process.arch === 'ia32' ? 4 : 8
+  if (stringByteLength === 0 || stringByteLength > byteLength - pointerOffset - (process.arch === 'ia32' ? 4 : 8)) return undefined
+  const stringPointer = process.arch === 'ia32'
+    ? BigInt(output.readUInt32LE(pointerOffset))
+    : output.readBigUInt64LE(pointerOffset)
+  if (stringPointer === 0n) return undefined
+  try {
+    return koffi.decode.string16(stringPointer, stringByteLength / 2).replace(/\0+$/, '')
+  } catch {
+    return undefined
+  }
 }
 
 function windowsProcessDetails(processId: number): Pick<ManagedProcessRecord, 'processStartedAt' | 'executablePath' | 'commandLine'> {
@@ -63,8 +96,10 @@ function windowsProcessDetails(processId: number): Pick<ManagedProcessRecord, 'p
       const value = Number(unixMilliseconds)
       if (Number.isSafeInteger(value) && value > 0) processStartedAt = value
     }
+    const commandLine = windowsProcessCommandLine(handle)
     return {
-      ...(executablePath ? { executablePath, commandLine: `"${executablePath}"` } : {}),
+      ...(executablePath ? { executablePath } : {}),
+      ...(commandLine ? { commandLine } : executablePath ? { commandLine: `"${executablePath}"` } : {}),
       ...(processStartedAt ? { processStartedAt } : {}),
     }
   } finally {
@@ -86,6 +121,7 @@ export function captureNativeWindowsProcessRecords(processNames: readonly string
     const entry = { dwSize: koffi.sizeof(WindowsProcessEntry32) } as {
       dwSize: number
       th32ProcessID?: number
+      th32ParentProcessID?: number
       szExeFile?: string
     }
     for (let found = Process32FirstW(snapshot, entry); found; found = Process32NextW(snapshot, entry)) {
@@ -96,7 +132,7 @@ export function captureNativeWindowsProcessRecords(processNames: readonly string
         continue
       }
       if (windowsSessionId(processId) === currentSessionId) {
-        records.push({ processId, name, ...windowsProcessDetails(processId) })
+        records.push({ processId, parentProcessId: Number(entry.th32ParentProcessID) || undefined, name, ...windowsProcessDetails(processId) })
       }
       entry.dwSize = koffi.sizeof(WindowsProcessEntry32)
     }
@@ -201,6 +237,7 @@ export function normalizeProcessRecords(value: unknown): ManagedProcessRecord[] 
     const candidate = record as Record<string, unknown>
     return [{
       processId: (candidate.processId ?? candidate.ProcessId) as ManagedProcessRecord['processId'],
+      parentProcessId: (candidate.parentProcessId ?? candidate.ParentProcessId) as ManagedProcessRecord['parentProcessId'],
       processStartedAt: (candidate.processStartedAt ?? candidate.ProcessStartedAt) as ManagedProcessRecord['processStartedAt'],
       name: (candidate.name ?? candidate.Name) as ManagedProcessRecord['name'],
       executablePath: (candidate.executablePath ?? candidate.ExecutablePath) as ManagedProcessRecord['executablePath'],

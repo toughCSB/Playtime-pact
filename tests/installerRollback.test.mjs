@@ -41,6 +41,7 @@ describe('installer rollback boundaries', () => {
     expect(init).toContain('$R7 == "0.61.0-rc.6"')
     expect(init).toContain('$R7 == "0.61.0-rc.7"')
     expect(init).toContain('$R7 == "0.61.0-rc.8"')
+    expect(init).toContain('$R7 == "0.61.0-rc.9"')
     expect(init).toContain('$PLUGINSDIR\\PlaytimePactInstallerAuth.exe" --authorize-upgrade')
     expect(init).not.toContain('CopyFiles /SILENT')
     expect(init).toContain('UninstallString')

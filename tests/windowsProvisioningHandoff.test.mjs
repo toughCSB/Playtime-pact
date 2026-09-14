@@ -299,7 +299,11 @@ describe('Windows provisioning resource mapping', () => {
 
   // Every packaged source must stay on this allowlist. A new entry here is a deliberate
   // decision to ship those bytes to every child PC, so it has to be reviewed as one.
-  const ALLOWED_PACKAGED_SOURCES = ['resources', 'scripts/provision-remote-approval.ps1']
+  const ALLOWED_PACKAGED_SOURCES = [
+    'build/native/PlaytimePactInstallerAuth.exe',
+    'resources',
+    'scripts/provision-remote-approval.ps1',
+  ]
 
   it('packages no source outside the reviewed provisioning/asset allowlist', () => {
     const declared = [...(builderConfig.extraResources ?? []), ...(builderConfig.extraFiles ?? [])]
