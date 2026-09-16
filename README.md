@@ -2,7 +2,7 @@
 
 > **부모와 자녀가 함께 정한 Roblox·Minecraft 게임 시간을 눈에 보이게 만들고, 자녀가 스스로 약속을 지키도록 돕는 Windows 데스크톱 타이머 앱**
 
-[![Version](https://img.shields.io/badge/version-0.61.0--rc.9-blue)](RELEASE_NOTES_0.61.0.md)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](RELEASE_NOTES_1.0.0.md)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)](#-설치-및-실행)
 [![Games](https://img.shields.io/badge/games-Roblox%20%7C%20Minecraft%20%7C%20Lunar-45b97c)](#-지원-게임)
 [![License](https://img.shields.io/badge/license-MIT-green)](#-라이선스)
@@ -11,17 +11,17 @@
 
 ## ⚠️ Windows 설치 전 꼭 읽어주세요
 
-현재 Windows 0.61.0-rc.9 설치 후보는 **공인 코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen, Smart App Control 또는 조직의 App Control 정책이 실행을 경고하거나 완전히 차단할 수 있습니다.
+현재 Windows 1.0.0 정식 버전은 **공인 코드 서명(Code Signing) 인증서가 적용되지 않은 unsigned 설치본**입니다. Windows Defender SmartScreen, Smart App Control 또는 조직의 App Control 정책이 실행을 경고하거나 완전히 차단할 수 있습니다.
 
 1. 반드시 신뢰할 수 있는 경로로 받은 설치 파일인지 확인합니다.
-2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 0.61.0-rc.9.exe`를 실행합니다.
+2. 게임을 모두 종료한 뒤 `Playtime Pact Setup 1.0.0.exe`를 실행합니다.
 3. 보호 서비스 설치를 위한 Windows 관리자 승인창은 부모가 직접 확인하고 승인합니다.
 4. 신규 설치의 초기 부모 PIN은 `0000`입니다. 설치 직후 관리자 화면의 **부모 PIN 변경**에서 바꿔 주세요.
 5. 첫 사용은 부모 입회하에 짧은 허용 시간으로 감지·경고·종료 동작을 확인합니다.
 
 Smart App Control에는 개별 앱 예외가 없습니다. 공개 배포에서는 CA가 발급한 신뢰된 인증서, Microsoft Store 서명 또는 자격을 충족한 오픈소스 서명 서비스를 사용해야 합니다. 로컬 자체 서명이나 unsigned 빌드는 다른 PC의 차단을 해소하지 못합니다. 보안 기능 해제를 일반 설치 방법으로 안내하지 않습니다. 자세한 내용은 [Windows 설치 안내](WINDOWS_INSTALL.md)를 확인하세요.
 
-> 0.61.0-rc.9는 Java의 실제 실행 명령과 Minecraft 런처의 자식 프로세스를 네이티브로 추적하고, 표준 계정의 Lunar/Minecraft 런타임용 AppLocker 보조 도구를 추가한 미서명 테스트 릴리스입니다. 설치 인증 로직과 신뢰된 배포자 서명은 서로 다른 문제이며, 현재 남은 공개 배포 차단 요인은 코드 서명입니다.
+> 1.0.0은 Java의 실제 실행 명령과 Minecraft 런처의 자식 프로세스를 네이티브로 추적하고, 표준 계정의 Lunar/Minecraft 런타임용 AppLocker 보조 도구를 포함한 첫 정식 버전입니다. 설치 인증 로직과 신뢰된 배포자 서명은 서로 다른 문제이며, 현재 남은 공개 배포 차단 요인은 코드 서명입니다.
 
 ---
 
@@ -234,7 +234,7 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 
 ---
 
-## ✅ v0.61.0-rc.9 Minecraft·Lunar 보강 요약
+## ✅ v1.0.0 정식 버전 요약
 
 - Windows 네이티브 API로 Java 프로세스의 실제 실행 명령을 읽어 공용 Java 경로의 Minecraft 실행도 식별
 - 실행 명령 접근이 거부되어도 Minecraft/Lunar 런처에서 이어진 Java 자식 프로세스를 추적하는 보조 감지
@@ -300,7 +300,7 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 
 ## 검증 상태
 
-최신 0.61.0-rc.9의 상세 기능 검증 범위는 [릴리스 노트](RELEASE_NOTES_0.61.0.md)를 확인하세요. 아래 표는 0.60.8 전체 회귀검사 기록이며, rc.7 설치 복구, rc.8 다중 사용자 감지, rc.9 Minecraft/Lunar 보강 결과는 위에 정리했습니다.
+최신 1.0.0의 상세 기능 검증 범위는 [릴리스 노트](RELEASE_NOTES_1.0.0.md)를 확인하세요. 아래 표는 0.60.8 전체 회귀검사 기록이며, 이후 설치 복구, 다중 사용자 감지, Minecraft/Lunar 보강 결과는 위에 정리했습니다.
 
 2026-09-09 Windows 0.60.8 후보 기준입니다.
 
@@ -320,13 +320,13 @@ Android 실기기, FCM 운영 설정, 서버 배포와 모니터링은 별도의
 - 다른 PC의 완전 신규 설치
 - 다른 구버전과 외부 프로그램을 포함한 모든 파일 잠금 복구 조합
 - Roblox·Minecraft Bedrock의 최신 실게임 종단 흐름
-- `joonw` 표준 계정에서 rc.9 설치본으로 Lunar/Minecraft를 실제 실행한 종단 흐름
+- `joonw` 표준 계정에서 1.0.0 설치본으로 Lunar/Minecraft를 실제 실행한 종단 흐름
 - 모든 경고 시점의 실제 게임 화면 표시와 월드 저장 무결성
 - 신뢰된 코드 서명과 경고 없는 공개 배포
 - Android 실기기·FCM 운영·원격 서버 배포
 - macOS 설치 및 동작
 
-자동 테스트 통과는 실기기에서 모든 조합이 정상이라는 뜻이 아닙니다. 위 한계를 유지한 채 Windows 0.61.0-rc.9 설치 후보로 관리합니다.
+자동 테스트 통과는 실기기에서 모든 조합이 정상이라는 뜻이 아닙니다. 1.0.0은 첫 정식 버전이지만 위 실기기 검증과 신뢰된 코드 서명은 별도 완료가 필요합니다.
 
 ---
 
@@ -438,6 +438,7 @@ npm run package:win
 
 | 버전 | 날짜 | 주요 변경 |
 |---|---|---|
+| **v1.0.0** | 2026-09-17 | 부모 제어·다중 계정 자동 실행·Roblox/Minecraft/Lunar 감지·보호 서비스 복구를 첫 정식 버전으로 승격 |
 | **v0.61.0-rc.9** | 2026-09-15 | Java 실제 명령·런처 계보 감지, 런처 오탐 제거, 표준 계정 게임 런타임 AppLocker 보조 도구 |
 | **v0.61.0-rc.8** | 2026-09-15 | 제한 언어 모드용 네이티브 게임 감지, 사용자 세션 분리, 수동 실행 화면 표시, 모든 사용자 바탕 화면 바로가기 |
 | **v0.61.0-rc.7** | 2026-09-13 | rc.2~rc.5 구버전 제거기를 우회하는 승인된 in-place 업그레이드와 감시 프로세스 종료 대기 보강 |
@@ -465,7 +466,7 @@ npm run package:win
 - [x] Roblox·Minecraft Java/Bedrock 및 Lunar Minecraft 감지
 - [x] Windows 보호 서비스와 부모 PIN 관리
 - [x] 정상 종료 요청·신원 재확인·강제 종료 fallback
-- [x] 0.61.0-rc.9 Windows 설치 후보 빌드, 설치 복구, 실제 Roblox 승인·타이머·만료 종료 및 Minecraft/Lunar 감지 보강
+- [x] 1.0.0 Windows 정식 빌드, 설치 복구, 실제 Roblox 승인·타이머·만료 종료 및 Minecraft/Lunar 감지 보강
 - [ ] 다른 Windows PC의 신규 설치 및 실게임 최종 확인
 - [ ] Roblox·Bedrock 최신 실게임 종단 검증
 - [ ] 신뢰된 코드 서명과 공개 Release

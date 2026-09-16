@@ -1,6 +1,6 @@
-# Playtime Pact 0.61.0-rc.9
+# Playtime Pact 1.0.0
 
-2026-09-15 · Windows x64 · 미서명 테스트 릴리스
+2026-09-17 · Windows x64 · 첫 정식 버전 · Authenticode 미서명
 
 ## 변경 사항
 
@@ -48,7 +48,7 @@ Microsoft 안내: https://learn.microsoft.com/en-us/windows/apps/package-and-dep
 - Electron 모의 데이터 화면 9종 생성·점검. 메인과 관리 화면의 드래그 영역 CSS를 확인했습니다. 이 PC에서 실제 Roblox 감지, 승인 전 종료, 부모 PIN 승인 후 재실행, 타이머 상태 생성, 남은 시간 만료 후 자동 종료까지 확인했습니다.
 - 원격 백엔드의 실제 로컬 Worker/D1 종단 검사까지 포함한 Node 통합 테스트를 끝까지 완료했습니다.
 - 배포용 실행 의존성 검사: npm audit --omit=dev 기준 알려진 취약점 0개. 개발·빌드 도구 전체의 취약점 0개를 의미하지 않습니다.
-- 공용 바탕 화면·시작 메뉴 바로가기와 모든 사용자 HKLM 자동 실행 등록은 이 PC에서 확인했습니다. `joonw` 계정의 Lunar Java 런타임 6개는 정책상 `Allowed`로 확인했지만, 표준 계정 로그인 후 rc.9로 Lunar/Minecraft를 실제 실행하는 전체 흐름과 다른 PC 신규 설치는 아직 최종 확인이 필요합니다. 이 때문에 정식 최신 릴리스로 승격하지 않습니다.
+- 공용 바탕 화면·시작 메뉴 바로가기와 모든 사용자 HKLM 자동 실행 등록은 이 PC에서 확인했습니다. `joonw` 계정의 Lunar Java 런타임 6개는 정책상 `Allowed`로 확인했지만, 표준 계정 로그인 후 1.0.0으로 Lunar/Minecraft를 실제 실행하는 전체 흐름과 다른 PC 신규 설치는 아직 최종 확인이 필요합니다.
 - 부모 PIN·기본 규칙·사용량은 rc.8 교체 설치 중 초기화하지 않았습니다.
 
 ## 부모님이 확인할 순서
@@ -65,7 +65,7 @@ Microsoft 안내: https://learn.microsoft.com/en-us/windows/apps/package-and-dep
 
 ## 다운로드 무결성
 
-Playtime Pact Setup 0.61.0-rc.9.exe
-SHA256: 2116DF99C047BAB9684B28AE9051E9F8A93128BE4C1FDEC7B3AFEC64D202193F
+Playtime Pact Setup 1.0.0.exe
+SHA256: 2F400811D84EE1234AEDF1DE7B367237BAB7CE1C693893A73C3FB7A2C4CE82FD
 
-파일 크기: 102,474,688 bytes.
+파일 크기: 102,474,601 bytes.

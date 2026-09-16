@@ -4,6 +4,12 @@ Playtime Pact의 새 저장소 기준 변경 사항을 기록합니다.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-09-17
+
+- 0.61.0 RC에서 검증한 부모 제어, 다중 Windows 계정 자동 실행, Roblox·Minecraft·Lunar 감지와 보호 서비스 복구 기능을 첫 정식 버전으로 승격했습니다.
+- 버전과 Windows 설치 파일 이름을 RC 접미사 없는 `1.0.0`으로 통일했습니다.
+- 설치 파일은 여전히 Authenticode 미서명이므로 SmartScreen, Smart App Control 또는 조직 정책에서 차단될 수 있습니다.
+
 ## [0.61.0-rc.9] — 2026-09-15
 
 - Windows 네이티브 API로 Java의 실제 실행 명령을 읽어 공용 Java 경로로 실행되는 Minecraft도 식별합니다.
