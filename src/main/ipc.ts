@@ -171,6 +171,7 @@ export function registerIpcHandlers(callbacks: {
       sessionsCompleted: usage.sessionsCompleted,
       sessionsPerDay,
       currentSessionActive: usage.currentSessionRemainingMs > 0,
+      pinApprovedSession: false,
     }
   })
 

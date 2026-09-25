@@ -42,6 +42,8 @@ describe('installed protected-policy startup', () => {
       const readTimerState = () => ({ date: '2026-09-09', pausedRemainingMs: 60000 })
       const getLocalDateString = () => '2026-09-09', isSessionExhausted = () => false
       const getDailyUsage = () => ({ date: '2026-09-09', currentSessionRemainingMs: 0, sessionsCompleted: 1 })
+      const volatilePinApprovedSession = false
+      const requiresParentPinForRepeatSession = (count, active, approved) => count > 0 && !(active && approved)
       const safeClearTimerState = () => {}
       const startTimer = () => { throw new Error('must not start') }
       ${source}

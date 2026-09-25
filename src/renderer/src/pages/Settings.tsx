@@ -335,7 +335,7 @@ export default function SettingsPage({ onBack, onLock }: Props) {
             <div>
               <strong>게임 시작 전 부모님 승인 받기</strong>
               <p>
-                켜면 이 PC에서 부모님 PIN을 입력하거나 연결된 모바일에서 승인할 수 있어요. 해제하면 정해진 시간 안에서 바로 플레이해요.
+                켜면 첫 게임 시작부터 이 PC의 부모님 PIN 또는 연결된 모바일 승인이 필요해요. 꺼도 2회차 시작은 PC 부모님 PIN이 필요하고, 승인한 회차의 남은 시간은 재승인 없이 이어져요.
               </p>
             </div>
             <span className={`ppt-toggle${settings.requireApprovalBeforeStart ? ' is-on' : ''}`} aria-hidden="true">

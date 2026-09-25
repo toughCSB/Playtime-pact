@@ -283,6 +283,7 @@ export interface DailyRemaining {
   sessionsCompleted: number
   sessionsPerDay: number
   currentSessionActive: boolean
+  pinApprovedSession: boolean
 }
 
 // SHA-256('0000')

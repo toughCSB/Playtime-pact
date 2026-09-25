@@ -53,6 +53,52 @@ describe('protected desktop usage', () => {
     expect(view).not.toHaveProperty('credits')
     expect(JSON.stringify(view).length).toBeLessThan(1000)
   })
+  it('persists PIN approval only for the current protected repeat-session balance', () => {
+    const { dir, store, day } = fixture()
+    const first = store.write({ date: '2026-09-09', sessionsCompleted: 0, currentSessionRemainingMs: 60_000 }, 0, credit)
+    const completed = store.write({ ...first.usage, sessionsCompleted: 1, currentSessionRemainingMs: 0 }, first.revision)
+    expect(completed.pinApprovedSession).toBe(false)
+    expect(() => store.approveRepeatSession()).toThrow('No repeat session balance')
+
+    const parentTime = store.write({ ...completed.usage, currentSessionRemainingMs: 30_000 }, completed.revision,
+      { ...credit, receipt: 'parent:repeat-time-0001', amountMs: 30_000, countsTowardDailySessions: false })
+    expect(parentTime.pinApprovedSession).toBe(false)
+    const approved = store.approveRepeatSession()
+    expect(publicUsageView(approved).pinApprovedSession).toBe(true)
+    const restarted = new ProtectedUsageStore(dir, () => '2026-09-09')
+    expect(restarted.read().pinApprovedSession).toBe(true)
+    const paused = restarted.write({ ...approved.usage, currentSessionRemainingMs: 15_000 }, approved.revision)
+    expect(paused.pinApprovedSession).toBe(true)
+    const finished = restarted.write({ ...paused.usage, currentSessionRemainingMs: 0 }, paused.revision)
+    expect(finished.pinApprovedSession).toBe(false)
+    day('2026-09-10')
+    expect(store.read().pinApprovedSession).toBeUndefined()
+  })
+  it('accepts PIN-authorized committed time without creating another daily quota bucket', () => {
+    const { store } = fixture()
+    const first = store.write({ date: '2026-09-09', sessionsCompleted: 1, currentSessionRemainingMs: 0 }, 0)
+    const second = store.write({ ...first.usage, currentSessionRemainingMs: 60_000 }, first.revision,
+      { ...credit, receipt: 'timer:policy:parent-pin-repeat-0001', pinApprovedSession: true })
+    expect(second.pinApprovedSession).toBe(true)
+    const resumed = store.write({ ...second.usage, currentSessionRemainingMs: 30_000 }, second.revision)
+    expect(resumed.pinApprovedSession).toBe(true)
+  })
+  it('keeps a PIN-approved repeat session authorized after a Windows reboot', () => {
+    const { dir } = fixture()
+    let now = 1_000
+    let bootEpoch = 100_000
+    const store = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => bootEpoch)
+    const completed = store.write({ ...store.read().usage, sessionsCompleted: 1 }, 0)
+    const running = store.write({ ...completed.usage, currentSessionRemainingMs: 60_000 }, completed.revision,
+      { ...credit, receipt: 'timer:policy:parent-pin-reboot-0001', pinApprovedSession: true }, true)
+    now += 6 * 60 * 60_000
+    bootEpoch += 6 * 60 * 60_000
+    const restarted = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => bootEpoch)
+    expect(restarted.read().usage.currentSessionRemainingMs).toBe(60_000)
+    expect(restarted.read().pinApprovedSession).toBe(true)
+    const resumed = restarted.write(restarted.read().usage, running.revision, undefined, true)
+    expect(resumed.pinApprovedSession).toBe(true)
+  })
   it('requires a journal credit for increases and never lets the same credit mint time twice', () => {
     const { store } = fixture()
     const initial = store.read()

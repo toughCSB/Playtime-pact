@@ -540,22 +540,60 @@ internal static class PlaytimePactInstallerAuth
     {
         string broker = Path.Combine(Root, "Broker");
         string accounting = Path.Combine(broker, "Accounting");
+        string data = Path.Combine(Root, "Data");
         try
         {
+            // A damaged PIN-file ACL can stop both upgrade authentication and
+            // service readiness. Repair metadata only; never rewrite the PIN.
+            lastDiagnostic = "protection-repair-admin-directory";
+            Directory.CreateDirectory(AdminDir);
+            SetProtectedDirectoryAccess(AdminDir);
+            foreach (string directory in Directory.GetDirectories(AdminDir, "*", SearchOption.AllDirectories))
+            {
+                lastDiagnostic = "protection-repair-admin-subdirectory";
+                SetProtectedDirectoryAccess(directory);
+            }
+            foreach (string file in Directory.GetFiles(AdminDir, "*", SearchOption.AllDirectories))
+            {
+                lastDiagnostic = "protection-repair-admin-" + SafeFileLabel(file);
+                SetProtectedFileAccess(file);
+            }
+            // Session history is shared across Windows accounts, unlike the
+            // PIN and accounting secrets. Restore its intended Users:Modify ACL.
+            lastDiagnostic = "protection-repair-data-directory";
+            Directory.CreateDirectory(data);
+            SetSharedDataDirectoryAccess(data);
+            foreach (string directory in Directory.GetDirectories(data, "*", SearchOption.AllDirectories))
+            {
+                lastDiagnostic = "protection-repair-data-subdirectory";
+                SetSharedDataDirectoryAccess(directory);
+            }
+            foreach (string file in Directory.GetFiles(data, "*", SearchOption.AllDirectories))
+            {
+                lastDiagnostic = "protection-repair-data-" + SafeFileLabel(file);
+                SetSharedDataFileAccess(file);
+            }
+            lastDiagnostic = "protection-repair-broker-directory";
             Directory.CreateDirectory(accounting);
             SetProtectedDirectoryAccess(broker);
             SetProtectedDirectoryAccess(accounting);
             foreach (string directory in Directory.GetDirectories(broker, "*", SearchOption.AllDirectories))
+            {
+                lastDiagnostic = "protection-repair-broker-subdirectory";
                 SetProtectedDirectoryAccess(directory);
+            }
             foreach (string file in Directory.GetFiles(broker, "*", SearchOption.AllDirectories))
+            {
+                lastDiagnostic = "protection-repair-broker-" + SafeFileLabel(file);
                 SetProtectedFileAccess(file);
+            }
             bool healthy = DiagnoseProtectionAccess();
             if (healthy) lastDiagnostic = "protection-repair-ok";
             return healthy;
         }
-        catch (UnauthorizedAccessException) { lastDiagnostic = "protection-repair-denied"; return false; }
-        catch (IOException ex) { lastDiagnostic = "protection-repair-io-" + ex.HResult.ToString("x8"); return false; }
-        catch (Exception ex) { lastDiagnostic = "protection-repair-" + ex.GetType().Name; return false; }
+        catch (UnauthorizedAccessException) { lastDiagnostic += "-denied"; return false; }
+        catch (IOException ex) { lastDiagnostic += "-io-" + ex.HResult.ToString("x8"); return false; }
+        catch (Exception ex) { lastDiagnostic += "-" + ex.GetType().Name; return false; }
     }
 
     private static void SetProtectedDirectoryAccess(string path)
@@ -587,6 +625,60 @@ internal static class PlaytimePactInstallerAuth
         File.SetAccessControl(path, security);
     }
 
+    private static void SetSharedDataDirectoryAccess(string path)
+    {
+        if (!EnsureSystemFullControl(path)) throw new UnauthorizedAccessException();
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(system);
+        const InheritanceFlags inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl,
+            inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl,
+            inheritance, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(users, FileSystemRights.Modify,
+            inheritance, PropagationFlags.None, AccessControlType.Allow));
+        Directory.SetAccessControl(path, security);
+    }
+
+    private static void SetSharedDataFileAccess(string path)
+    {
+        if (!EnsureSystemFullControl(path, true)) throw new UnauthorizedAccessException();
+        lastDiagnostic += "-apply-acl";
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(administrators);
+        security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(users, FileSystemRights.Modify, AccessControlType.Allow));
+        try
+        {
+            File.SetAccessControl(path, security);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // A stale explicit deny on a shared session file can survive a
+            // grant and prevent .NET from replacing its DACL. Reset only the
+            // ACL to the already-repaired parent directory; preserve bytes.
+            lastDiagnostic += "-reset-acl";
+            string quoted = "\"" + path + "\"";
+            int reset = RunQuiet("icacls.exe", quoted + " /reset", 10000);
+            if (reset != 0)
+            {
+                lastDiagnostic += "-exit-" + reset;
+                throw;
+            }
+            lastDiagnostic += "-retry";
+            File.SetAccessControl(path, security);
+        }
+    }
+
     private static string SafeFileLabel(string path)
     {
         string name = Path.GetFileName(path).ToLowerInvariant();
@@ -597,17 +689,44 @@ internal static class PlaytimePactInstallerAuth
         if (name == "accounting.journal") return "accounting-journal";
         if (name == "desktop-usage.json") return "desktop-usage";
         if (name == "local-policy.json") return "local-policy";
+        if (name == "sessions.json") return "sessions";
         if (name.StartsWith("local-policy.v")) return "local-policy-version";
         if (name.StartsWith("usage.v")) return "usage-version";
         return "other-file";
     }
 
-    private static bool EnsureSystemFullControl(string path)
+    private static bool EnsureSystemFullControl(string path, bool allowAdministratorsOwner = false)
     {
         string quoted = "\"" + path + "\"";
-        int owner = RunQuiet("icacls.exe", quoted + " /setowner *S-1-5-18 /C", 10000);
-        int access = RunQuiet("icacls.exe", quoted + " /inheritance:r /grant:r *S-1-5-18:F /C", 10000);
-        return owner == 0 && access == 0;
+        int owner = RunQuiet("icacls.exe", quoted + " /setowner *S-1-5-18", 10000);
+        if (owner != 0)
+        {
+            // This helper runs as LocalSystem. Taking ownership for the
+            // Administrators group (/A) leaves the SYSTEM process unable to
+            // replace some damaged child-file DACLs. Claim it for SYSTEM.
+            int take = RunQuiet("takeown.exe", "/F " + quoted, 10000);
+            if (take != 0)
+            {
+                lastDiagnostic += "-setowner-exit-" + owner + "-takeown-exit-" + take;
+                return false;
+            }
+            // takeown already made this service's current LocalSystem account
+            // the owner. A second icacls /setowner can return access denied
+            // even though SYSTEM now owns the file; continue to DACL repair.
+            bool tookSystemOwnership = WindowsIdentity.GetCurrent().User.IsWellKnown(WellKnownSidType.LocalSystemSid);
+            if (!tookSystemOwnership) owner = RunQuiet("icacls.exe", quoted + " /setowner *S-1-5-18", 10000);
+            if (owner != 0 && !tookSystemOwnership && !allowAdministratorsOwner)
+            {
+                lastDiagnostic += "-setowner-retry-exit-" + owner;
+                return false;
+            }
+        }
+        int access = RunQuiet("icacls.exe", quoted + " /inheritance:r /grant:r *S-1-5-18:F", 10000);
+        if (access != 0) lastDiagnostic += "-grant-exit-" + access;
+        // As the file owner, SYSTEM can still replace its DACL through the
+        // following SetAccessControl call if icacls rejects an intermediate
+        // grant. A failed SetAccessControl remains a hard installation error.
+        return access == 0 || owner == 0 || WindowsIdentity.GetCurrent().User.IsWellKnown(WellKnownSidType.LocalSystemSid);
     }
 
     private static bool IsDigits(string value)

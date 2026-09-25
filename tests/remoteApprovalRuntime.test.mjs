@@ -167,6 +167,12 @@ describe('runtime remote approval broker', () => {
     )
     await expect(coordinator.startPolicyAuthorized({ gameId: 'roblox', processId: 'fresh-process', processStartedAt: 2_000 }, 20)).resolves.toBe(true)
     expect(receipts).toEqual([expect.objectContaining({ receipt: 'timer:policy:policy-fresh-process-2000', minutes: 20, permission: expect.objectContaining({ processId: 'fresh-process' }) })])
+    await expect(coordinator.startParentPinAuthorized({ gameId: 'roblox', processId: 'pin-process', processStartedAt: 2_100 }, 20)).resolves.toBe(true)
+    expect(receipts[1]).toMatchObject({
+      receipt: 'timer:policy:parent-pin-pin-process-2100',
+      permission: { householdId: 'policy', pcId: 'policy', requestId: 'parent-pin-pin-process-2100' },
+      scope: { householdId: 'policy', pcId: 'policy' },
+    })
     const denied = new RemoteStartCoordinator(null, () => true, () => true, null, () => null, () => 1_000, () => authority(1, 1), scopeFor)
     await expect(denied.startPolicyAuthorized({ gameId: 'roblox', processId: 'other-process', processStartedAt: 2_001 }, 20)).resolves.toBe(false)
   })
@@ -491,6 +497,27 @@ describe('runtime remote approval broker', () => {
       await service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-revoke-001', operation: 'revoke-pin', payload: {} }, 'peer-a')
       await expect(service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-write-0004', adminSession: verified.token, operation: 'set-local-policy', payload: { policy } }, 'peer-a')).rejects.toThrow('capability')
       expect(PrivilegedApprovalService.loadLocalPolicy(directory)).toMatchObject({ version: 1, weekdayLimit: 30, weekdaySessionCount: 2 })
+    } finally {
+      expect(removeTestPolicySelector(directory)).toBe(true)
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+  it('stores an approved repeat-session balance only after a valid parent PIN', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-repeat-pin-'))
+    try {
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts()
+      const part = (type) => parts.find((entry) => entry.type === type).value
+      const day = `${part('year')}-${part('month')}-${part('day')}`
+      PrivilegedApprovalService.initializeLocalProtection(directory, () => ({ date: day, sessionsCompleted: 1, currentSessionRemainingMs: 60_000 }))
+      const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} }, directory, () => 1_000, (pin) => pin === '1234')
+      const client = new PrivilegedBrokerClient((request) => service.invoke(request, 'parent-peer'))
+      await expect(client.approveRepeatSession()).rejects.toThrow('capability')
+      expect(await client.verifyPin('1234')).toBe(true)
+      await expect(client.approveRepeatSession()).resolves.toMatchObject({ pinApprovedSession: true })
+      expect((await client.readDailyUsage()).pinApprovedSession).toBe(true)
+      await client.revokePin()
+      await expect(client.approveRepeatSession()).rejects.toThrow('capability')
     } finally {
       expect(removeTestPolicySelector(directory)).toBe(true)
       rmSync(directory, { recursive: true, force: true })

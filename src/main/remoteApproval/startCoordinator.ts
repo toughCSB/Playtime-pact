@@ -252,8 +252,16 @@ export class RemoteStartCoordinator {
   }
 
   startPolicyAuthorized(trustedProcess: TrustedProcess, minutes: number): Promise<boolean> {
+    return this.startLocallyAuthorized(trustedProcess, minutes, 'policy')
+  }
+
+  startParentPinAuthorized(trustedProcess: TrustedProcess, minutes: number): Promise<boolean> {
+    return this.startLocallyAuthorized(trustedProcess, minutes, 'parent-pin')
+  }
+
+  private startLocallyAuthorized(trustedProcess: TrustedProcess, minutes: number, authorization: 'policy' | 'parent-pin'): Promise<boolean> {
     const permission: RemoteApprovalPermissionTuple = {
-      householdId: 'policy', requestId: `policy-${trustedProcess.processId}-${trustedProcess.processStartedAt}`,
+      householdId: 'policy', requestId: `${authorization}-${trustedProcess.processId}-${trustedProcess.processStartedAt}`,
       pcId: 'policy', gameId: trustedProcess.gameId, allowanceVersion: 1,
       processId: trustedProcess.processId, processStartedAt: trustedProcess.processStartedAt,
     }

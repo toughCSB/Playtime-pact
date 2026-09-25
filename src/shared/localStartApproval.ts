@@ -8,6 +8,7 @@ export class LocalStartApproval {
   issue(policyVersion: number): void {
     this.approval = { issuedAt: this.now(), monotonicIssuedAt: this.monotonicNow(), policyVersion }
   }
+  clear(): void { this.approval = null }
   claim(processStartedAt: number, policyVersion: number): boolean {
     const approval = this.approval
     if (!approval) return false

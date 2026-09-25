@@ -80,6 +80,7 @@ export default function Timer({ onOpenSettings, onAddTime, onActiveChange, reque
   const [dailyRemainingSeconds, setDailyRemainingSeconds] = useState<number | null>(null)
   const [dailyExhausted, setDailyExhausted] = useState(false)
   const [sessionsCompleted, setSessionsCompleted] = useState(0)
+  const [pinApprovedSession, setPinApprovedSession] = useState(false)
   const [sessionsPerDay, setSessionsPerDay] = useState(1)
   const [currentSessionActive, setCurrentSessionActive] = useState(false)
   const [surface, setSurface] = useState<'play' | 'rules'>('play')
@@ -163,6 +164,7 @@ export default function Timer({ onOpenSettings, onAddTime, onActiveChange, reque
         setDailyRemainingSeconds(result.remainingSeconds)
         setDailyExhausted(result.exhausted)
         setSessionsCompleted(result.sessionsCompleted)
+        setPinApprovedSession(result.pinApprovedSession === true)
         setSessionsPerDay(result.sessionsPerDay)
         setCurrentSessionActive(result.currentSessionActive)
       })
@@ -527,7 +529,8 @@ export default function Timer({ onOpenSettings, onAddTime, onActiveChange, reque
   const displayRemainingSeconds = dailyRemainingSeconds ?? (todayLimitMinutes * 60)
   const displayRemainingMinutes = Math.ceil(displayRemainingSeconds / 60)
   const canStart = isStartable && !dailyExhausted
-  const requiresParentApproval = displaySettings.requireApprovalBeforeStart && !currentSessionActive
+  const repeatSessionNeedsPin = sessionsCompleted > 0 && (!currentSessionActive || !pinApprovedSession)
+  const requiresParentApproval = repeatSessionNeedsPin || (displaySettings.requireApprovalBeforeStart && !currentSessionActive)
   const remoteExpiry = remoteState?.grant?.expiresAt ?? remoteState?.request?.expiresAt ?? null
   const remoteSecondsRemaining = remoteExpiry === null ? 0 : Math.max(0, Math.ceil((remoteExpiry - remoteNow) / 1000))
   const remoteIsOutage = remoteState?.lifecycle === 'offline' || remoteState?.lifecycle === 'error'
@@ -721,9 +724,9 @@ export default function Timer({ onOpenSettings, onAddTime, onActiveChange, reque
               {requiresParentApproval ? '부모 PIN으로 시작 승인' : '게임 타임 시작'}
             </button>
             <p className="ppt-helper-text">
-              {requiresParentApproval ? '부모님이 PIN으로 승인한 뒤 5분 안에 게임을 실행해요.' : 'Minecraft나 Roblox를 켜면 자동으로 이어져요.'}
+              {repeatSessionNeedsPin ? '2회차 시작은 PC 부모님 PIN이 필요해요. 승인한 회차의 남은 시간은 그대로 이어져요.' : requiresParentApproval ? '부모님이 PIN으로 승인한 뒤 5분 안에 게임을 실행해요.' : 'Minecraft나 Roblox를 켜면 자동으로 이어져요.'}
             </p>
-            {requiresParentApproval && !remoteLoading && !remoteIsOutage ? (
+            {requiresParentApproval && !repeatSessionNeedsPin && !remoteLoading && !remoteIsOutage ? (
               <details className="ppt-rules-details">
                 <summary>모바일로 승인 요청</summary>
                 <p className="ppt-helper-text">연결된 부모님 기기로 요청해요. 승인 후 게임을 다시 실행해주세요.</p>

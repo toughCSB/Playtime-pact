@@ -35,4 +35,11 @@ describe('local parent start approval', () => {
     expect(f.approval.claim(f.now(), 2)).toBe(false)
     expect(f.approval.claim(f.now(), 1)).toBe(false)
   })
+  it('clears an unused approval when an existing session resumes', () => {
+    const f = fixture()
+    f.approval.issue(1)
+    f.approval.clear()
+    f.advance(100)
+    expect(f.approval.claim(f.now(), 1)).toBe(false)
+  })
 })

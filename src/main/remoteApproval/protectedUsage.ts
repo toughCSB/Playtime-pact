@@ -3,10 +3,11 @@ import { join } from 'node:path'
 import { uptime } from 'node:os'
 import type { DailyUsage } from '../../shared/types'
 
-export type ProtectedUsageSnapshot = { revision: number; usage: DailyUsage; credits: string[]; runningUntil?: number; bootEpochMs?: number; countsTowardDailySessions?: boolean }
-export type ProtectedUsageView = Pick<ProtectedUsageSnapshot, 'revision' | 'usage' | 'runningUntil'>
-export const publicUsageView = ({ revision, usage, runningUntil }: ProtectedUsageSnapshot): ProtectedUsageView => ({ revision, usage, ...(runningUntil === undefined ? {} : { runningUntil }) })
-export type UsageCredit = { receipt: string; amountMs: number; date: string; countsTowardDailySessions?: boolean }
+export type ProtectedUsageSnapshot = { revision: number; usage: DailyUsage; credits: string[]; runningUntil?: number; bootEpochMs?: number; countsTowardDailySessions?: boolean; pinApprovedSession?: boolean }
+export type ProtectedUsageView = Pick<ProtectedUsageSnapshot, 'revision' | 'usage' | 'runningUntil' | 'pinApprovedSession'>
+export const publicUsageView = ({ revision, usage, runningUntil, pinApprovedSession }: ProtectedUsageSnapshot): ProtectedUsageView => ({ revision, usage,
+  ...(runningUntil === undefined ? {} : { runningUntil }), ...(pinApprovedSession === undefined ? {} : { pinApprovedSession }) })
+export type UsageCredit = { receipt: string; amountMs: number; date: string; countsTowardDailySessions?: boolean; pinApprovedSession?: boolean }
 const MAX_MS = 86_400_000
 // Shared by every store instance in this service process. A new Windows boot
 // changes this value even when the wall clock advances while the PC is off.
@@ -33,6 +34,7 @@ export class ProtectedUsageStore {
       || (value.runningUntil !== undefined && (!Number.isSafeInteger(value.runningUntil) || value.runningUntil < 0))
       || (value.bootEpochMs !== undefined && (!Number.isSafeInteger(value.bootEpochMs) || value.bootEpochMs < 0))
       || (value.countsTowardDailySessions !== undefined && typeof value.countsTowardDailySessions !== 'boolean')
+      || (value.pinApprovedSession !== undefined && typeof value.pinApprovedSession !== 'boolean')
       || !Array.isArray(value.credits) || value.credits.length > 4096
       || value.credits.some((receipt) => typeof receipt !== 'string' || !/^[A-Za-z0-9._:-]{16,256}$/.test(receipt))) {
       throw new Error('Protected usage integrity unavailable')
@@ -54,6 +56,16 @@ export class ProtectedUsageStore {
     const { runningUntil: _deadline, bootEpochMs: _boot, ...paused } = current
     this.persist({ ...paused, revision: current.revision + 1 })
   }
+  approveRepeatSession(): ProtectedUsageSnapshot {
+    const current = this.read()
+    if (current.usage.sessionsCompleted < 1 || current.usage.currentSessionRemainingMs <= 0) {
+      throw new Error('No repeat session balance to approve')
+    }
+    const { runningUntil: _deadline, bootEpochMs: _boot, ...paused } = current
+    const approved = { ...paused, revision: current.revision + 1, pinApprovedSession: true }
+    this.persist(approved)
+    return approved
+  }
   private readAt(day: string, now: number): ProtectedUsageSnapshot {
     const current = this.load()
     if (current.usage.date > day) throw new Error('Protected usage date rollback denied')
@@ -71,7 +83,8 @@ export class ProtectedUsageStore {
     }
     const remaining = Math.min(current.usage.currentSessionRemainingMs, Math.max(0, current.runningUntil - now))
     return { ...current, usage: { ...current.usage, currentSessionRemainingMs: remaining,
-      sessionsCompleted: current.usage.sessionsCompleted + (remaining === 0 && current.countsTowardDailySessions ? 1 : 0) } }
+      sessionsCompleted: current.usage.sessionsCompleted + (remaining === 0 && current.countsTowardDailySessions ? 1 : 0) },
+      pinApprovedSession: remaining > 0 && current.pinApprovedSession === true }
   }
   write(usage: DailyUsage, expectedRevision: number, credit?: UsageCredit, running = false): ProtectedUsageSnapshot {
     const day = this.today(), now = this.now()
@@ -93,6 +106,8 @@ export class ProtectedUsageStore {
     const next = { revision: current.revision + 1, usage: { ...usage, sessionsCompleted: completed, currentSessionRemainingMs: remaining },
       credits: unusedCredit ? [...current.credits, unusedCredit.receipt] : current.credits,
       countsTowardDailySessions: remaining > 0 && (pendingBase || Boolean(unusedCredit && unusedCredit.countsTowardDailySessions !== false)),
+      pinApprovedSession: remaining > 0 && (unusedCredit?.pinApprovedSession === true
+        || (current.pinApprovedSession === true && completed === stored.usage.sessionsCompleted)),
       ...(running && remaining > 0 ? { runningUntil: now + remaining, bootEpochMs: this.bootEpochMs() } : {}) }
     if (!validUsage(next.usage)) throw new Error('Protected usage value invalid')
     if (next.credits.length > 4096) throw new Error('Protected usage credit capacity denied')

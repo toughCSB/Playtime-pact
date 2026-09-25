@@ -19,7 +19,7 @@ import {
   appendSession, readSessions,
 } from './fileStore'
 import { isHourAllowed } from '../shared/policy'
-import { shouldRequireApprovalForStart } from '../shared/startPolicy'
+import { requiresParentPinForRepeatSession, shouldRequireApprovalForStart } from '../shared/startPolicy'
 import { LocalStartApproval } from '../shared/localStartApproval'
 import { shouldBlockTimerStartWithoutSupportedGame, shouldPauseTimerWhenSupportedGameMissing } from '../shared/robloxSync'
 import { listSecondaryManagedGames, selectPrimaryManagedGame, type ManagedGameSnapshot } from '../shared/managedGames'
@@ -94,9 +94,6 @@ let timerUiMode: 'corner' | 'center-popup' | 'center-countdown' | 'shutdown' = '
 let lastCornerOverlayBounds: Electron.Rectangle | null = null
 let centerPopupEpoch = 0
 
-let trayClicks: number[] = []
-let trayClickTimer: ReturnType<typeof setTimeout> | null = null
-
 let managedGameDetectInterval: ReturnType<typeof setInterval> | null = null
 let activeManagedGameIds: ManagedGameId[] = []
 let primaryManagedGameId: ManagedGameId | null = null
@@ -106,6 +103,7 @@ const observedProcessStartedAt = new Map<number, number>()
 
 let timerDisplay: Electron.Display | null = null
 let volatileDailyUsage: DailyUsage | null = null
+let volatilePinApprovedSession = false
 const startHidden = shouldStartHiddenFromLaunch({ argv: process.argv, isPackaged: app.isPackaged })
 let managedGameBaselineCaptured = false
 const privilegedBroker = new PrivilegedBrokerClient(namedPipeTransport(PRIVILEGED_PIPE))
@@ -164,8 +162,11 @@ let accountingIntegrityFault = true
 let protectedLocalPolicy: ProtectedLocalPolicy | null = null
 const remoteStartCoordinator = new RemoteStartCoordinator(
   remoteApprovalClient,
-  async ({ permission }) => {
+  async ({ permission, source }) => {
     if (accountingIntegrityFault || gameTerminationPending) return false
+    // Automatic policy and mobile grants cannot authorize a second daily session.
+    if (requiresParentPinForRepeatSession(getDailyUsage().sessionsCompleted)
+      && !(source === 'local' && permission.householdId === 'policy' && permission.requestId.startsWith('parent-pin-'))) return false
     const snapshot = await getManagedGameSnapshot()
     return !accountingIntegrityFault && !gameTerminationPending && mainWindow !== null
       && timerStart === null
@@ -181,6 +182,8 @@ const remoteStartCoordinator = new RemoteStartCoordinator(
     const persisted = readTimerState()
     if ((timerStart !== null && timerStartReceipt === receipt) || persisted?.startReceipt === receipt) return true
     if (!mainWindow || timerStart !== null || remoteApprovalController.isRecoveryInProgress()) return false
+    if (requiresParentPinForRepeatSession(getDailyUsage().sessionsCompleted)
+      && !receipt.startsWith('timer:policy:parent-pin-')) return false
     const snapshot = await getManagedGameSnapshot()
     if (!mainWindow || timerStart !== null || gameTerminationPending || remoteApprovalController.isRecoveryInProgress()) return false
     if (shouldBlockTimerStartWithoutSupportedGame(app.isPackaged, snapshot.activeGameIds.length > 0)) return false
@@ -327,7 +330,10 @@ function persistProtectedUsage(usage: DailyUsage, creditReceipt?: string, runnin
     if (usageRevision === null || accountingIntegrityFault) throw new Error('Protected usage not ready')
     const result = await privilegedBroker.writeDailyUsage(snapshot, usageRevision, creditReceipt, running)
     usageRevision = result.revision
-    if (generation === usageWriteGeneration) volatileDailyUsage = result.usage
+    if (generation === usageWriteGeneration) {
+      volatileDailyUsage = result.usage
+      volatilePinApprovedSession = result.pinApprovedSession === true
+    }
   }).finally(() => { usageWritesPending-- })
   usageWriteQueue = write.catch(handleUsagePersistenceFailure)
   return write
@@ -528,9 +534,19 @@ const parentStartApproval = new LocalStartApproval()
 let parentStartPending = false
 async function approveNextSession(): Promise<boolean> {
   if (!protectedLocalPolicy || accountingIntegrityFault || !isAllowedHour()
-    || isSessionExhausted(getLocalDateString()) || gameTerminationPending) return false
+    || isSessionExhausted(getLocalDateString()) || gameTerminationPending || usageWritesPending > 0) return false
   const games = await getManagedGameSnapshot()
   if (games.activeGameIds.length > 0) return false
+  const usage = getDailyUsage()
+  if (usage.currentSessionRemainingMs > 0) {
+    if (usage.sessionsCompleted === 0) return false
+    if (!volatilePinApprovedSession) {
+      await privilegedBroker.approveRepeatSession()
+      await requireProtectedPolicyReadiness()
+    }
+    parentStartApproval.clear()
+    return true
+  }
   parentStartApproval.issue(protectedLocalPolicy.version)
   return true
 }
@@ -595,6 +611,7 @@ async function requireProtectedPolicyReadiness(): Promise<void> {
   const snapshot = await privilegedBroker.readDailyUsage()
   usageRevision = snapshot.revision
   volatileDailyUsage = snapshot.usage
+  volatilePinApprovedSession = snapshot.pinApprovedSession === true
   accountingIntegrityFault = false
 }
 
@@ -727,6 +744,11 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
   const usageToday = usage && usage.date === today ? usage : null
 
   if (usageToday && usageToday.currentSessionRemainingMs > 0) {
+    if (requiresParentPinForRepeatSession(usageToday.sessionsCompleted, true, volatilePinApprovedSession)) {
+      enforceManagedGameBlock('approval-required', snapshot.activeGameIds[0])
+      return false
+    }
+    parentStartApproval.clear()
     const resumeState = readPausedTimerResumeState(today, usageToday.currentSessionRemainingMs)
     void startTimer(mainWindow, perSessionMinutes, {
       resumeRemainingMs: resumeState.remainingMs,
@@ -755,13 +777,17 @@ function startTimerForDetectedManagedGames(snapshot: ManagedGameSnapshot): boole
   const pinProcess = getTrustedManagedProcess(snapshot, primaryManagedGameId ?? snapshot.activeGameIds[0])
   if (pinProcess && parentStartApproval.claim(pinProcess.processStartedAt, protectedLocalPolicy.version)) {
     parentStartPending = true
-    void remoteStartCoordinator.startPolicyAuthorized(pinProcess, perSessionMinutes)
+    void remoteStartCoordinator.startParentPinAuthorized(pinProcess, perSessionMinutes)
       .then((started) => { if (!started && timerStart === null) enforceManagedGameBlock('approval-required', pinProcess.gameId) })
       .catch(() => enforceManagedGameBlock('approval-required', pinProcess.gameId))
       .finally(() => { parentStartPending = false })
     return false
   }
-  if (!shouldRequireApprovalForStart(protectedLocalPolicy, { hasActiveSession: false })) {
+  if (requiresParentPinForRepeatSession(usageToday?.sessionsCompleted ?? 0)) {
+    enforceManagedGameBlock('approval-required', snapshot.activeGameIds[0])
+    return false
+  }
+  if (!shouldRequireApprovalForStart(protectedLocalPolicy, { hasActiveSession: false, sessionsCompleted: usageToday?.sessionsCompleted ?? 0 })) {
     const process = snapshot.classifiedProcesses.find((candidate) => candidate.gameId === (primaryManagedGameId ?? snapshot.activeGameIds[0]))
     const startedAt = process && observedProcessStartedAt.get(process.pid)
     if (!process || !startedAt) return false
@@ -1030,6 +1056,7 @@ function completeActiveTimer(win: BrowserWindow, authorizedAdjustment = false, d
   if (isManagedGameTerminationInFlight()) return
   if (timerLimitMs === null || gameTerminationPending || (timerAdjustmentInFlight && !authorizedAdjustment)) return
   gameTerminationPending = true
+  parentStartApproval.clear()
   gameTerminationAttemptFinished = false
   const today = dayRollover ? timerDay ?? getLocalDateString() : getLocalDateString()
   const usage = dayRollover ? null : getDailyUsage()
@@ -1411,6 +1438,8 @@ async function tryResumeTimer(): Promise<boolean> {
 
   const usage = getDailyUsage()
   // A protected zero is authoritative; a stale/editable timer file cannot revive it.
+  if (requiresParentPinForRepeatSession(usage.sessionsCompleted, usage.currentSessionRemainingMs > 0, volatilePinApprovedSession)) return false
+  parentStartApproval.clear()
   const dailyRemaining = usage.date === today ? usage.currentSessionRemainingMs : 0
 
   const remaining = Math.min(stateRemaining, dailyRemaining)
@@ -1515,28 +1544,6 @@ function openAdminWindow(): void {
   })
 }
 
-function addTrayClick(count = 1): void {
-  const now = Date.now()
-  trayClicks = trayClicks.filter(t => now - t < 1500)
-  for (let i = 0; i < count; i++) trayClicks.push(now)
-
-  if (trayClickTimer) clearTimeout(trayClickTimer)
-
-  if (trayClicks.length >= 3) {
-    trayClicks = []
-    openAdminWindow()
-    return
-  }
-
-  trayClickTimer = setTimeout(() => {
-    trayClicks = []
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      showMainWindowForCurrentPresentation(mainWindow)
-      mainWindow.focus()
-    }
-  }, 400)
-}
-
 function loadTrayIcon(): Electron.NativeImage {
   const resourcesDir = getResourcesDir()
   const candidatePaths = process.platform === 'win32'
@@ -1571,8 +1578,8 @@ function createTray(): void {
     const icon = loadTrayIcon()
     tray = new Tray(icon)
     tray.setToolTip('Playtime Pact')
-    tray.on('click', () => addTrayClick(1))
-    tray.on('double-click', () => addTrayClick(2))
+    // Single-click intentionally does nothing: it must not reveal a parent surface.
+    tray.on('double-click', openAdminWindow)
   } catch (err) {
     console.error('tray creation failed; continuing without crashing startup', err)
   }
@@ -1774,6 +1781,10 @@ function createWindow(): void {
     const usageToday = usage && usage.date === today ? usage : null
 
     if (usageToday && usageToday.currentSessionRemainingMs > 0) {
+      if (requiresParentPinForRepeatSession(usageToday.sessionsCompleted, true, volatilePinApprovedSession)) {
+        return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'approval-required' }
+      }
+      parentStartApproval.clear()
       const resumeState = readPausedTimerResumeState(today, usageToday.currentSessionRemainingMs)
       await startTimer(mainWindow, limitMins, {
         resumeRemainingMs: resumeState.remainingMs,
@@ -1799,6 +1810,10 @@ function createWindow(): void {
     if (!process || !startedAt) {
       return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'managed-game-not-running' }
     }
+    if (requiresParentPinForRepeatSession(sessionsCompleted)) {
+      // A renderer request cannot bypass the detection loop's PIN claim.
+      return { resumed: false, remainingSeconds: 0, exhausted: false, blocked: 'approval-required' }
+    }
     const remoteState = remoteApprovalController.getState()
     const capturedAuthority = remoteApprovalController.getAuthoritySnapshot()
     const fence = remoteRelaunchFence
@@ -1814,7 +1829,7 @@ function createWindow(): void {
           capturedAuthority,
         ).then((result) => { if (result === 'started') clearRemoteRelaunchFence() })
       }
-    } else if (protectedLocalPolicy && !shouldRequireApprovalForStart(protectedLocalPolicy, { hasActiveSession: false })) {
+    } else if (protectedLocalPolicy && !shouldRequireApprovalForStart(protectedLocalPolicy, { hasActiveSession: false, sessionsCompleted })) {
       void remoteStartCoordinator.startPolicyAuthorized(
         { gameId: process.gameId, processId: String(process.pid), processStartedAt: startedAt },
         limitMins,
@@ -2032,7 +2047,8 @@ app.whenReady().then(async () => {
       const exhausted = accountingIntegrityFault || isDailyUsageExhausted(usage, sessionsPerDay)
       return { remainingSeconds: exhausted ? 0 : usage.currentSessionRemainingMs > 0 ? Math.ceil(usage.currentSessionRemainingMs / 1000) : perSessionMinutes * 60,
         exhausted, totalSeconds: perSessionMinutes * 60, sessionsCompleted: usage.sessionsCompleted, sessionsPerDay,
-        currentSessionActive: !exhausted && usage.currentSessionRemainingMs > 0 }
+        currentSessionActive: !exhausted && usage.currentSessionRemainingMs > 0,
+        pinApprovedSession: !exhausted && usage.currentSessionRemainingMs > 0 && volatilePinApprovedSession }
     },
     approveNextSession,
     verifyAdminPin: (pin) => privilegedBroker.verifyPin(pin),

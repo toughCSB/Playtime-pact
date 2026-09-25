@@ -138,6 +138,33 @@ describe('renderer interactions', () => {
     expect(await screen.findByText(/승인 완료! 5분 안에/)).toBeTruthy()
   })
 
+  it('shows PC PIN only for the second session even when first-session approval is disabled', async () => {
+    const { api } = createApi()
+    api.dailyGetRemaining.mockResolvedValue({
+      date: '2026-08-02', sessionsCompleted: 1, sessionsPerDay: 2,
+      currentSessionActive: false, remainingSeconds: 3600, exhausted: false,
+    })
+    api.remoteGetState.mockResolvedValue({ lifecycle: 'online', health: 'online', updatedAt: Date.now(), serverTime: Date.now() })
+    window.api = api as Window['api']
+    const user = userEvent.setup()
+    render(<App />)
+    const start = await screen.findByRole('button', { name: '부모 PIN으로 시작 승인' })
+    expect(screen.getByText(/2회차 시작은 PC 부모님 PIN/)).toBeTruthy()
+    expect(screen.queryByText('모바일로 승인 요청')).toBeNull()
+    await user.click(start)
+    expect(screen.getByRole('dialog', { name: 'PIN을 눌러주세요' })).toBeTruthy()
+  })
+
+  it('does not ask again when the protected second session still has approved time', async () => {
+    const { api } = createApi()
+    api.dailyGetRemaining.mockResolvedValue({ date: '2026-08-02', sessionsCompleted: 1, sessionsPerDay: 2,
+      currentSessionActive: true, pinApprovedSession: true, remainingSeconds: 1200, exhausted: false })
+    window.api = api as Window['api']
+    render(<App />)
+    expect(await screen.findByRole('button', { name: '게임 타임 시작' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '부모 PIN으로 시작 승인' })).toBeNull()
+  })
+
   it('opens quick time directly, reuses a live parent session, and locks explicitly', async () => {
     const { api } = createApi()
     api.adminIsUnlocked.mockResolvedValue(true)

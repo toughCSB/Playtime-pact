@@ -4,6 +4,15 @@ import { describe, expect, it } from 'vitest'
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
 
 describe('native window presentation contract', () => {
+  it('ignores tray single clicks and opens a PIN-gated admin window only on double click', () => {
+    const main = read('src/main/main.ts')
+    const tray = main.slice(main.indexOf('function createTray()'), main.indexOf('function startManagedGameDetection()'))
+    expect(tray).toContain("tray.on('double-click', openAdminWindow)")
+    expect(tray).not.toContain("tray.on('click'")
+    expect(main).not.toContain('function addTrayClick(')
+    expect(main).not.toContain('trayClicks')
+  })
+
   it('keeps main and admin full pages responsive, transparent, and non-resizable', () => {
     const main = read('src/main/main.ts')
     expect(main).toContain('getFullPageWindowGeometry(display.workArea, MAIN_WINDOW_PROFILE)')

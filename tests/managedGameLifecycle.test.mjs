@@ -13,6 +13,7 @@ const source = ts.transpileModule([
 function harness(success) {
   return new Function('terminationSuccess', `
     const isManagedGameTerminationInFlight = () => false
+    const parentStartApproval = { clear() {} }
     let timerLimitMs = 60_000, timerStart = 1, timerStartReceipt = 'timer:policy:fixture'
     let gameTerminationPending = false, gameTerminationAttemptFinished = false, timerAdjustmentInFlight = false
     let timerSessionStartTime = '20:00', timerLimitAtSession = 1, mainWindowPresentation = 'active-overlay', blockedFailureContext = null

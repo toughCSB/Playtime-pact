@@ -506,6 +506,10 @@ export class PrivilegedApprovalService {
       return true
     }
     if (request.capability === 'membership' && !this.consume(request.adminSession, peer)) throw new Error('Privileged service capability denied')
+    if (request.operation === 'approve-repeat-session') {
+      if (request.capability !== 'membership' || Object.keys(request.payload).length !== 0) throw new Error('Privileged service capability denied')
+      return publicUsageView(this.usageStore().approveRepeatSession())
+    }
     if (request.operation === 'change-pin') { const pin = String(request.payload.newPin ?? ''); if (!/^\d{4}$/.test(pin)) throw new Error('invalid pin'); writeAdminPasswordPin(pin); for (const [token, session] of this.tokens) if (session.peer === peer) this.tokens.delete(token); return true }
     if (request.operation === 'read-local-policy') {
       if (request.capability !== 'operational' || !this.localPolicy) throw new Error('Protected local policy uninitialized')
@@ -523,7 +527,11 @@ export class PrivilegedApprovalService {
       if (receipt !== undefined && !entry) throw new Error('Protected usage credit not found')
       const scope = entry && scopeFromKey(entry.scopeKey, entry.state.scopes[entry.scopeKey]!)
       return publicUsageView(this.usageStore().write(request.payload.usage as DailyUsage, Number(request.payload.expectedRevision),
-        entry && scope ? { receipt: entry.receipt, amountMs: entry.amountMs, date: scope.ianaDay, countsTowardDailySessions: entry.operation === 'commit' } : undefined, request.payload.running === true))
+        entry && scope ? { receipt: entry.receipt, amountMs: entry.amountMs, date: scope.ianaDay,
+          countsTowardDailySessions: entry.operation === 'commit',
+          pinApprovedSession: entry.operation === 'commit' && entry.permission?.householdId === 'policy'
+            && entry.permission.pcId === 'policy' && entry.permission.requestId.startsWith('parent-pin-') } : undefined,
+        request.payload.running === true))
     }
     if (request.operation === 'health-check') {
       if (request.capability !== 'accounting' || Object.keys(request.payload).length !== 0) throw new Error('Privileged service capability denied')
@@ -1103,6 +1111,10 @@ export class PrivilegedBrokerClient implements BrokerSignedProofOperations {
     }
   }
   async verifyPin(pin: string): Promise<boolean> { const result = await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), operation: 'verify-pin', payload: { pin } }) as { ok?: boolean; token?: string }; this.token = result.ok ? result.token : undefined; return Boolean(this.token) }
+  async approveRepeatSession(): Promise<ProtectedUsageView> {
+    return this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), adminSession: this.token,
+      operation: 'approve-repeat-session', payload: {} }) as Promise<ProtectedUsageView>
+  }
   async revokePin(): Promise<void> {
     this.token = undefined
     await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), operation: 'revoke-pin', payload: {} })
