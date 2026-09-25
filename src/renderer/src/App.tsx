@@ -100,6 +100,11 @@ export default function App() {
 
   useModalFocusBoundary(settingsPinOpen, settingsDialogRef, appBackgroundRef, settingsTriggerRef, closeSettingsPin)
 
+  useEffect(() => window.api?.onAdminLocked?.(() => {
+    closeSettingsPin()
+    setPage('timer')
+  }), [])
+
   if (isAdminWindow) {
     return <AdminPanel />
   }

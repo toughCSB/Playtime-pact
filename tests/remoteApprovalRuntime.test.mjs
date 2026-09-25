@@ -471,7 +471,8 @@ describe('runtime remote approval broker', () => {
   it('persists only administrator-authenticated protected local policy', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'playtime-pact-local-policy-'))
     try {
-      const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} }, directory, () => 1_000, (pin) => pin === '1234')
+      let now = 1_000
+      const service = new PrivilegedApprovalService(async () => ({}), async () => ({}), { scopes: {} }, directory, () => now, (pin) => pin === '1234')
       const verified = await service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-verify-001', operation: 'verify-pin', payload: { pin: '1234' } }, 'peer-a')
       const policy = {
         ianaTimeZone: 'Asia/Seoul',
@@ -485,6 +486,10 @@ describe('runtime remote approval broker', () => {
       }
       await expect(service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-write-0001', adminSession: verified.token, operation: 'set-local-policy', payload: { policy } }, 'peer-a')).resolves.toMatchObject({ version: 1, ianaTimeZone: 'Asia/Seoul' })
       await expect(service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-write-0002', operation: 'set-local-policy', payload: { policy } }, 'peer-a')).rejects.toThrow('capability')
+      now += 10 * 60_000
+      await expect(service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-write-0003', adminSession: verified.token, operation: 'set-local-policy', payload: { policy } }, 'peer-a')).resolves.toMatchObject({ version: 1 })
+      await service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-revoke-001', operation: 'revoke-pin', payload: {} }, 'peer-a')
+      await expect(service.invoke({ capability: 'membership', purpose: 'membership-sync', nonce: 'policy-write-0004', adminSession: verified.token, operation: 'set-local-policy', payload: { policy } }, 'peer-a')).rejects.toThrow('capability')
       expect(PrivilegedApprovalService.loadLocalPolicy(directory)).toMatchObject({ version: 1, weekdayLimit: 30, weekdaySessionCount: 2 })
     } finally {
       expect(removeTestPolicySelector(directory)).toBe(true)

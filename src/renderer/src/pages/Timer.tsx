@@ -140,6 +140,13 @@ export default function Timer({ onOpenSettings, onAddTime, onActiveChange, reque
     }
   }, [visible])
 
+  // Keep the home screen in sync when it stays open across local midnight.
+  useEffect(() => {
+    if (!visible) return
+    const poll = window.setInterval(() => refreshDailyUsage(), 15_000)
+    return () => window.clearInterval(poll)
+  }, [visible])
+
   useEffect(() => window.api?.onSettingsChanged?.((next) => {
     setSettings(next)
     refreshDailyUsage()

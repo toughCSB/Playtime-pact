@@ -25,6 +25,7 @@ declare global {
       onSettingsChanged(cb: (settings: PublicSettings) => void): () => void
       adminIsUnlocked(): Promise<boolean>
       adminLock(): Promise<void>
+      onAdminLocked(cb: () => void): () => void
       writeSettings(s: PublicSettings): Promise<PublicSettings>
       readSessions(): Promise<Session[]>
 

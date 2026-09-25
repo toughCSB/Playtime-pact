@@ -1,23 +1,33 @@
 import type { IpcMainInvokeEvent } from 'electron'
-import { canUseAdminSession } from '../shared/policy'
+const adminSessions = new Set<number>()
+const lockGenerations = new Map<number, number>()
 
-const ADMIN_SESSION_MS = 5 * 60 * 1000
-const adminSessions = new Map<number, number>()
-
-export function grantAdminSession(event: IpcMainInvokeEvent, now = Date.now()): void {
-  adminSessions.set(event.sender.id, now + ADMIN_SESSION_MS)
+export function adminLockGeneration(webContentsId: number): number {
+  if (!lockGenerations.has(webContentsId)) lockGenerations.set(webContentsId, 0)
+  return lockGenerations.get(webContentsId)!
 }
 
-export function requireAdminSession(event: IpcMainInvokeEvent, now = Date.now()): void {
-  if (!canUseAdminSession(now, adminSessions.get(event.sender.id))) {
+export function grantAdminSession(event: IpcMainInvokeEvent, expectedGeneration = adminLockGeneration(event.sender.id)): boolean {
+  if (adminLockGeneration(event.sender.id) !== expectedGeneration) return false
+  adminSessions.add(event.sender.id)
+  return true
+}
+
+export function requireAdminSession(event: IpcMainInvokeEvent): void {
+  if (!adminSessions.has(event.sender.id)) {
     throw new Error('admin authorization required')
   }
 }
 
-export function hasAdminSession(event: IpcMainInvokeEvent, now = Date.now()): boolean {
-  return canUseAdminSession(now, adminSessions.get(event.sender.id))
+export function hasAdminSession(event: IpcMainInvokeEvent): boolean {
+  return adminSessions.has(event.sender.id)
 }
 
 export function clearAdminSession(webContentsId: number): void {
   adminSessions.delete(webContentsId)
+  lockGenerations.set(webContentsId, adminLockGeneration(webContentsId) + 1)
+}
+
+export function clearAllAdminSessions(): void {
+  for (const id of lockGenerations.keys()) clearAdminSession(id)
 }

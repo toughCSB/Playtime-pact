@@ -88,6 +88,13 @@ describe('protected desktop usage', () => {
     day('2026-09-09')
     expect(() => store.read()).toThrow('date rollback')
   })
+  it('resets yesterday\'s remaining time and completed count at local midnight', () => {
+    const { store, day } = fixture()
+    const credited = store.write({ date: '2026-09-09', sessionsCompleted: 0, currentSessionRemainingMs: 60_000 }, 0, credit)
+    store.write({ ...credited.usage, sessionsCompleted: 1 }, credited.revision)
+    day('2026-09-10')
+    expect(store.read().usage).toEqual({ date: '2026-09-10', sessionsCompleted: 0, currentSessionRemainingMs: 0 })
+  })
   it('preserves migrated usage and never reruns migration or resets corrupted data', () => {
     const { dir, store } = fixture()
     const initial = store.read()
@@ -123,5 +130,46 @@ describe('protected desktop usage', () => {
     expect(paused.usage.currentSessionRemainingMs).toBe(20_000)
     now += 120_000
     expect(restarted.read().usage.currentSessionRemainingMs).toBe(20_000)
+  })
+  it('preserves the last durable remaining time across a Windows reboot', () => {
+    const { dir } = fixture()
+    let now = 1_000
+    let bootEpoch = 100_000
+    const store = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => bootEpoch)
+    store.write({ ...store.read().usage, currentSessionRemainingMs: 180 * 60_000 }, 0,
+      { ...credit, amountMs: 180 * 60_000 }, true)
+    now += 20 * 60_000
+    const checkpoint = store.write({ ...store.read().usage }, 1, undefined, true)
+    expect(checkpoint.usage.currentSessionRemainingMs).toBe(160 * 60_000)
+
+    // Six hours powered off must not be counted as six hours of play.
+    now += 6 * 60 * 60_000
+    bootEpoch += 6 * 60 * 60_000
+    const restarted = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => bootEpoch)
+    expect(restarted.read().usage).toMatchObject({ sessionsCompleted: 0, currentSessionRemainingMs: 160 * 60_000 })
+    const paused = restarted.write(restarted.read().usage, checkpoint.revision)
+    expect(paused).not.toHaveProperty('runningUntil')
+    now += 60_000
+    expect(restarted.read().usage.currentSessionRemainingMs).toBe(160 * 60_000)
+  })
+  it('still charges elapsed time when only the service restarts on the same boot', () => {
+    const { dir } = fixture()
+    let now = 1_000
+    const store = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => 100_000)
+    store.write({ ...store.read().usage, currentSessionRemainingMs: 60_000 }, 0, credit, true)
+    now += 30_000
+    const restartedService = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => 101_000)
+    expect(restartedService.read().usage.currentSessionRemainingMs).toBe(30_000)
+  })
+  it('freezes the exact remaining time on a graceful Windows shutdown', () => {
+    const { dir } = fixture()
+    let now = 1_000
+    const store = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => 100_000)
+    store.write({ ...store.read().usage, currentSessionRemainingMs: 60_000 }, 0, credit, true)
+    now += 20_000
+    store.pauseForShutdown()
+    now += 4 * 60 * 60_000
+    const restarted = new ProtectedUsageStore(dir, () => '2026-09-09', () => now, () => 400_000)
+    expect(restarted.read().usage.currentSessionRemainingMs).toBe(40_000)
   })
 })

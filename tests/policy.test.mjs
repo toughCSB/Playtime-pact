@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import {
   isHourAllowed,
   redactSettings,
-  canUseAdminSession,
 } from '../src/shared/policy'
 import { normalizeTimerAdjustmentMinutes } from '../src/shared/timerAdjust'
 
@@ -34,12 +33,6 @@ describe('policy helpers', () => {
     expect(isHourAllowed(22, 16, 22)).toBe(false)
     expect(isHourAllowed(23, 16, 24)).toBe(true)
     expect(isHourAllowed(12, 0, 24)).toBe(true)
-  })
-
-  it('canUseAdminSession accepts only unexpired authenticated sessions', () => {
-    expect(canUseAdminSession(1_000, 1_001)).toBe(true)
-    expect(canUseAdminSession(1_000, 1_000)).toBe(false)
-    expect(canUseAdminSession(1_000, 0)).toBe(false)
   })
 
   it('normalizeTimerAdjustmentMinutes accepts signed integer minute adjustments', () => {

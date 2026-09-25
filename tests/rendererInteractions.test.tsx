@@ -152,7 +152,24 @@ describe('renderer interactions', () => {
     await screen.findByRole('button', { name: '게임 규칙 저장' })
     await user.click(screen.getByRole('button', { name: '잠금' }))
     expect(api.adminLock).toHaveBeenCalledOnce()
+    await waitFor(() => expect(api.hideMainWindow).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('button', { name: '+15분' })).toBeNull()
+    api.adminIsUnlocked.mockResolvedValue(false)
+    await user.click(screen.getByRole('button', { name: '부모님 관리' }))
     expect(await screen.findByLabelText('부모님 4자리 PIN')).toBeTruthy()
+  })
+
+  it('labels the settings minimize control as lock and hides only after revoking access', async () => {
+    const { api } = createApi()
+    api.adminIsUnlocked.mockResolvedValue(true)
+    window.api = api as Window['api']
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(await screen.findByRole('button', { name: '부모님 관리' }))
+    await user.click(await screen.findByRole('button', { name: '잠금 후 최소화' }))
+    await waitFor(() => expect(api.hideMainWindow).toHaveBeenCalledOnce())
+    expect(api.adminLock).toHaveBeenCalledOnce()
+    expect(api.adminLock.mock.invocationCallOrder[0]).toBeLessThan(api.hideMainWindow.mock.invocationCallOrder[0])
   })
 
   it('dismisses the settings PIN dialog when a live game activates the compact timer', async () => {

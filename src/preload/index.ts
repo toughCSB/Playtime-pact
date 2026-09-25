@@ -42,6 +42,11 @@ const api = {
     ipcRenderer.invoke('admin:verify-password', { pin }),
   adminIsUnlocked: (): Promise<boolean> => ipcRenderer.invoke('admin:is-unlocked'),
   adminLock: (): Promise<void> => ipcRenderer.invoke('admin:lock'),
+  onAdminLocked: (cb: () => void): (() => void) => {
+    const handler = () => cb()
+    ipcRenderer.on('admin:locked', handler)
+    return () => ipcRenderer.removeListener('admin:locked', handler)
+  },
   adminUnlockSettings: (pin: string): Promise<boolean> =>
     ipcRenderer.invoke('admin:unlock-settings', { pin }),
   adminApproveNextSession: (pin: string): Promise<AdminApprovalResult> =>

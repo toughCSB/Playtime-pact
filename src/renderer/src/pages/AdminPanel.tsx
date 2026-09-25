@@ -492,8 +492,8 @@ function AdminStage({ destination, onBack }: { destination: 'timer' | 'safety'; 
           </div>
           <label className="ppt-toggle-card">
             <div>
-              <strong>재부팅 후 타이머 유지</strong>
-              <p>컴퓨터를 다시 켜도 타이머가 이어집니다.</p>
+              <strong>앱 재시작 시 자동 이어가기</strong>
+              <p>남은 시간은 항상 저장돼요. 이 옵션은 게임이 실행 중일 때 타이머 자동 재개에만 적용돼요.</p>
             </div>
             <span className={`ppt-toggle${resumeEnabled ? ' is-on' : ''}`} aria-hidden="true">
               <span className="ppt-toggle__thumb" />
@@ -570,7 +570,26 @@ export default function AdminPanel({ authenticated = false, initialDestination =
     }, 15_000)
     return () => window.clearInterval(poll)
   }, [stage])
-  const back = onBack ?? (() => { void window.api?.showMainWindow(); void window.api?.adminCloseWindow() })
+  const leaveAdmin = async (minimize: boolean) => {
+    const locking = window.api?.adminLock().catch(() => undefined)
+    setStage('pin')
+    if (minimize) {
+      if (onBack) {
+        onBack()
+        window.api?.hideMainWindowNow()
+        void window.api?.hideMainWindow().catch(() => undefined)
+      } else {
+        void window.api?.adminCloseWindow().catch(() => undefined)
+      }
+      await locking
+      return
+    }
+    await locking
+    if (onBack) onBack()
+    else { await window.api?.showMainWindow(); await window.api?.adminCloseWindow() }
+  }
+  const back = () => { void leaveAdmin(false) }
+  const lockAndMinimize = () => { void leaveAdmin(true) }
   return (
     <SmartphoneShell surface={`admin-${destination}`} title="부모님 관리자"
       nav={stage === 'admin' ? (
@@ -584,10 +603,10 @@ export default function AdminPanel({ authenticated = false, initialDestination =
         {stage === 'pin' ? <PinStage onSuccess={() => setStage('admin')} onBack={onBack} /> : <>
           <div className="ppt-parent-toolbar app-drag">
             <button className="ppt-button ppt-button--ghost ppt-button--small no-drag" onClick={back}>← 메인</button>
-            <span>부모님 인증됨 · 5분 유지</span>
-            <button className="ppt-button ppt-button--ghost ppt-button--small no-drag" onClick={() => { void window.api?.adminLock(); setStage('pin') }}>잠금</button>
+            <span>부모님 인증됨</span>
+            <button className="ppt-button ppt-button--ghost ppt-button--small no-drag" onClick={lockAndMinimize}>잠금</button>
           </div>
-          {destination === 'settings' ? <Settings onBack={back} /> : <AdminStage destination={destination} onBack={back} />}
+          {destination === 'settings' ? <Settings onBack={back} onLock={lockAndMinimize} /> : <AdminStage destination={destination} onBack={back} />}
         </>}
       </div>
     </SmartphoneShell>

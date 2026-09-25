@@ -20,7 +20,8 @@ describe('parent control IPC boundary', () => {
   it('requires PIN before editing, broadcasts authoritative policy and locks only this renderer', async () => {
     const saved = { ...DEFAULT_PUBLIC_SETTINGS, weekdayLimit: 120, weekdaySessionCount: 0 }
     const protect = vi.fn(async () => {})
-    registerIpcHandlers({ verifyAdminPin: async (pin) => pin === '1234', protectLocalPolicy: protect, readPublicSettings: () => saved })
+    const revoke = vi.fn(async () => {})
+    registerIpcHandlers({ verifyAdminPin: async (pin) => pin === '1234', revokeAdminPin: revoke, protectLocalPolicy: protect, readPublicSettings: () => saved })
     const invoke = (name: string, payload?: any) => mocks.handlers.get(name)!(event, payload)
     expect(await invoke('admin:is-unlocked')).toBe(false)
     await expect(invoke('settings:write', saved)).rejects.toThrow('authorization')
@@ -31,6 +32,7 @@ describe('parent control IPC boundary', () => {
     expect(mocks.send).toHaveBeenCalledWith('settings:changed', saved)
     await expect(mocks.handlers.get('admin:is-unlocked')!({ sender: { id: 42 } })).resolves.toBe(false)
     await invoke('admin:lock')
+    expect(revoke).toHaveBeenCalledOnce()
     await expect(invoke('settings:write', saved)).rejects.toThrow('authorization')
   })
   it('does not report successful approval when PIN passes but the next launch cannot be authorized', async () => {
@@ -42,5 +44,17 @@ describe('parent control IPC boundary', () => {
     expect(await invoke('1234')).toMatchObject({ ok: false, reason: 'start-unavailable' })
     approve.mockResolvedValue(true)
     expect(await invoke('1234')).toMatchObject({ ok: true, preauthorizedNextLaunch: true })
+  })
+  it('does not reopen a hidden parent screen when PIN verification finishes after locking', async () => {
+    let finishVerification!: (ok: boolean) => void
+    const pending = new Promise<boolean>((resolve) => { finishVerification = resolve })
+    const revoke = vi.fn(async () => {})
+    registerIpcHandlers({ verifyAdminPin: () => pending, revokeAdminPin: revoke })
+    const unlock = mocks.handlers.get('admin:unlock-settings')!(event, { pin: '1234' })
+    await mocks.handlers.get('admin:lock')!(event)
+    finishVerification(true)
+    await expect(unlock).resolves.toBe(false)
+    await expect(mocks.handlers.get('admin:is-unlocked')!(event)).resolves.toBe(false)
+    expect(revoke).toHaveBeenCalledTimes(2)
   })
 })

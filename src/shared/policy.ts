@@ -16,7 +16,3 @@ export function isHourAllowed(hour: number, allowedStartHour: number, allowedEnd
   }
   return hour >= allowedStartHour || hour < allowedEndHour
 }
-
-export function canUseAdminSession(now: number, expiresAt: number | undefined): boolean {
-  return typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > now
-}

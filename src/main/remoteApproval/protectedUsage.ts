@@ -1,12 +1,17 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, fsyncSync } from 'node:fs'
 import { join } from 'node:path'
+import { uptime } from 'node:os'
 import type { DailyUsage } from '../../shared/types'
 
-export type ProtectedUsageSnapshot = { revision: number; usage: DailyUsage; credits: string[]; runningUntil?: number; countsTowardDailySessions?: boolean }
+export type ProtectedUsageSnapshot = { revision: number; usage: DailyUsage; credits: string[]; runningUntil?: number; bootEpochMs?: number; countsTowardDailySessions?: boolean }
 export type ProtectedUsageView = Pick<ProtectedUsageSnapshot, 'revision' | 'usage' | 'runningUntil'>
 export const publicUsageView = ({ revision, usage, runningUntil }: ProtectedUsageSnapshot): ProtectedUsageView => ({ revision, usage, ...(runningUntil === undefined ? {} : { runningUntil }) })
 export type UsageCredit = { receipt: string; amountMs: number; date: string; countsTowardDailySessions?: boolean }
 const MAX_MS = 86_400_000
+// Shared by every store instance in this service process. A new Windows boot
+// changes this value even when the wall clock advances while the PC is off.
+const SERVICE_BOOT_EPOCH_MS = Math.round(Date.now() - uptime() * 1000)
+const SAME_BOOT_TOLERANCE_MS = 3_000
 const validUsage = (usage: DailyUsage): boolean => Boolean(usage && /^\d{4}-\d{2}-\d{2}$/.test(usage.date)
   && Number.isSafeInteger(usage.sessionsCompleted) && usage.sessionsCompleted >= 0 && usage.sessionsCompleted <= 1000
   && Number.isSafeInteger(usage.currentSessionRemainingMs) && usage.currentSessionRemainingMs >= 0 && usage.currentSessionRemainingMs <= MAX_MS)
@@ -14,7 +19,8 @@ const validUsage = (usage: DailyUsage): boolean => Boolean(usage && /^\d{4}-\d{2
 /** Only the privileged service opens this protected file. No caller-selected paths. */
 export class ProtectedUsageStore {
   private readonly path: string
-  constructor(directory: string, private readonly today: () => string, private readonly now = () => Date.now()) { this.path = join(directory, 'desktop-usage.json') }
+  constructor(directory: string, private readonly today: () => string, private readonly now = () => Date.now(),
+    private readonly bootEpochMs = () => SERVICE_BOOT_EPOCH_MS) { this.path = join(directory, 'desktop-usage.json') }
   initialize(migrate: () => DailyUsage | null): void {
     if (existsSync(this.path)) { this.load(); return }
     const usage = migrate() ?? { date: this.today(), sessionsCompleted: 0, currentSessionRemainingMs: 0 }
@@ -25,6 +31,7 @@ export class ProtectedUsageStore {
     const value = JSON.parse(readFileSync(this.path, 'utf8')) as ProtectedUsageSnapshot
     if (!value || !Number.isSafeInteger(value.revision) || value.revision < 0 || !validUsage(value.usage)
       || (value.runningUntil !== undefined && (!Number.isSafeInteger(value.runningUntil) || value.runningUntil < 0))
+      || (value.bootEpochMs !== undefined && (!Number.isSafeInteger(value.bootEpochMs) || value.bootEpochMs < 0))
       || (value.countsTowardDailySessions !== undefined && typeof value.countsTowardDailySessions !== 'boolean')
       || !Array.isArray(value.credits) || value.credits.length > 4096
       || value.credits.some((receipt) => typeof receipt !== 'string' || !/^[A-Za-z0-9._:-]{16,256}$/.test(receipt))) {
@@ -41,6 +48,12 @@ export class ProtectedUsageStore {
   read(): ProtectedUsageSnapshot {
     return this.readAt(this.today(), this.now())
   }
+  pauseForShutdown(): void {
+    const current = this.read()
+    if (current.runningUntil === undefined) return
+    const { runningUntil: _deadline, bootEpochMs: _boot, ...paused } = current
+    this.persist({ ...paused, revision: current.revision + 1 })
+  }
   private readAt(day: string, now: number): ProtectedUsageSnapshot {
     const current = this.load()
     if (current.usage.date > day) throw new Error('Protected usage date rollback denied')
@@ -50,6 +63,12 @@ export class ProtectedUsageStore {
       return next
     }
     if (current.runningUntil === undefined) return current
+    if (current.bootEpochMs !== undefined && Math.abs(current.bootEpochMs - this.bootEpochMs()) > SAME_BOOT_TOLERANCE_MS) {
+      // A reboot ends every game process. Preserve the last durable heartbeat,
+      // rather than spending the hours for which Windows was powered off.
+      const { runningUntil: _deadline, bootEpochMs: _boot, ...paused } = current
+      return paused
+    }
     const remaining = Math.min(current.usage.currentSessionRemainingMs, Math.max(0, current.runningUntil - now))
     return { ...current, usage: { ...current.usage, currentSessionRemainingMs: remaining,
       sessionsCompleted: current.usage.sessionsCompleted + (remaining === 0 && current.countsTowardDailySessions ? 1 : 0) } }
@@ -74,7 +93,7 @@ export class ProtectedUsageStore {
     const next = { revision: current.revision + 1, usage: { ...usage, sessionsCompleted: completed, currentSessionRemainingMs: remaining },
       credits: unusedCredit ? [...current.credits, unusedCredit.receipt] : current.credits,
       countsTowardDailySessions: remaining > 0 && (pendingBase || Boolean(unusedCredit && unusedCredit.countsTowardDailySessions !== false)),
-      ...(running && remaining > 0 ? { runningUntil: now + remaining } : {}) }
+      ...(running && remaining > 0 ? { runningUntil: now + remaining, bootEpochMs: this.bootEpochMs() } : {}) }
     if (!validUsage(next.usage)) throw new Error('Protected usage value invalid')
     if (next.credits.length > 4096) throw new Error('Protected usage credit capacity denied')
     this.persist(next)

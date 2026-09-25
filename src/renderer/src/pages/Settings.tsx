@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { PairingSession, ParentDevice, PublicSettings, RemoteApprovalHealth } from '../../../shared/types'
 import { DEFAULT_PUBLIC_SETTINGS } from '../../../shared/types'
 import VoxelCrew from '../components/VoxelCrew'
@@ -7,6 +7,7 @@ import QRCode from 'qrcode'
 
 interface Props {
   onBack: () => void
+  onLock: () => void
 }
 
 interface SettingsCardProps {
@@ -30,7 +31,7 @@ function SettingsCard({ title, subtitle, children }: SettingsCardProps) {
   )
 }
 
-export default function SettingsPage({ onBack }: Props) {
+export default function SettingsPage({ onBack, onLock }: Props) {
   const [settings, setSettings] = useState<PublicSettings>({ ...DEFAULT_PUBLIC_SETTINGS })
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
@@ -53,22 +54,6 @@ export default function SettingsPage({ onBack }: Props) {
   const shutdownDialogRef = useRef<HTMLDivElement | null>(null)
   const shutdownTriggerRef = useRef<HTMLElement | null>(null)
   const firstInputRef = useRef<HTMLInputElement | null>(null)
-
-  const hideMainWindow = (event?: MouseEvent<HTMLButtonElement> | PointerEvent<HTMLButtonElement>) => {
-    event?.preventDefault()
-    event?.stopPropagation()
-    const api = window.api
-    if (!api) {
-      setError('창 제어 서비스에 연결할 수 없어요. 앱을 다시 시작해주세요.')
-      return
-    }
-    try {
-      api.hideMainWindowNow()
-      void api.hideMainWindow().catch(() => setError('창을 숨기지 못했어요. 다시 시도해주세요.'))
-    } catch {
-      setError('창을 숨기지 못했어요. 다시 시도해주세요.')
-    }
-  }
 
   const refreshRemoteAdmin = async () => {
     setRemoteStatus('loading')
@@ -232,11 +217,10 @@ export default function SettingsPage({ onBack }: Props) {
           <button
             type="button"
             className="ppt-window-action window-hide-button"
-            onPointerDown={hideMainWindow}
-            onClick={hideMainWindow}
-            aria-label="창 숨기기"
+            onClick={onLock}
+            aria-label="잠금 후 최소화"
           >
-            −
+            잠금
           </button>
         </div>
       </div>

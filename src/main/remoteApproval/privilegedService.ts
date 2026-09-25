@@ -445,7 +445,7 @@ function createSecuredWindowsPipe(pipe: string): unknown {
 }
 
 export class PrivilegedApprovalService {
-  private readonly seen = new Map<string, number>(); private readonly tokens = new Map<string, { peer: string; expires: number }>()
+  private readonly seen = new Map<string, number>(); private readonly tokens = new Map<string, { peer: string }>()
   private readonly pinCallers = new Map<string, { attempts: number; lockedUntil: number }>()
   private pinGlobal = { attempts: 0, lockedUntil: 0 }
   private readonly journal: JournalEntry[]
@@ -485,6 +485,7 @@ export class PrivilegedApprovalService {
     if (!this.stateDir || !this.localPolicy) throw new Error('Protected local policy uninitialized')
     return new ProtectedUsageStore(this.stateDir, () => currentScopeDay({ ianaTimeZone: this.localPolicy!.ianaTimeZone } as ProtectedAccountingScope))
   }
+  pauseUsageForShutdown(): void { this.usageStore().pauseForShutdown() }
   async invoke(request: PrivilegedRequest, peer: string): Promise<unknown> {
     for (const [value, expires] of this.seen) if (expires < this.now()) this.seen.delete(value)
     if (this.seen.size >= 4096) throw new Error('Privileged service replay capacity denied')
@@ -497,7 +498,12 @@ export class PrivilegedApprovalService {
       this.recordPinAttempt(peer, ok)
       if (!ok) return { ok: false }
       if (this.tokens.size >= 128) this.tokens.delete(this.tokens.keys().next().value!)
-      const token = nonce(); this.tokens.set(token, { peer, expires: this.now() + 300000 }); return { ok: true, token }
+      const token = nonce(); this.tokens.set(token, { peer }); return { ok: true, token }
+    }
+    if (request.operation === 'revoke-pin') {
+      if (request.capability !== 'membership') throw new Error('Privileged service capability denied')
+      for (const [token, session] of this.tokens) if (session.peer === peer) this.tokens.delete(token)
+      return true
     }
     if (request.capability === 'membership' && !this.consume(request.adminSession, peer)) throw new Error('Privileged service capability denied')
     if (request.operation === 'change-pin') { const pin = String(request.payload.newPin ?? ''); if (!/^\d{4}$/.test(pin)) throw new Error('invalid pin'); writeAdminPasswordPin(pin); for (const [token, session] of this.tokens) if (session.peer === peer) this.tokens.delete(token); return true }
@@ -577,7 +583,7 @@ export class PrivilegedApprovalService {
     this.pinCallers.set(peer, increment(this.pinCallers.get(peer)))
     if (this.pinCallers.size > 4096) this.pinCallers.delete(this.pinCallers.keys().next().value!)
   }
-  private consume(token: string | undefined, peer: string): boolean { const session = token && this.tokens.get(token); return Boolean(session && session.peer === peer && session.expires >= this.now()) }
+  private consume(token: string | undefined, peer: string): boolean { const session = token && this.tokens.get(token); return Boolean(session && session.peer === peer) }
   private finishPendingOutcomes(): void {
     for (const start of this.journal.filter((entry) => entry.operation === 'start')) {
       const related = this.journal.filter((entry) => entry.base === start.base && entry.scopeKey === start.scopeKey)
@@ -1097,6 +1103,10 @@ export class PrivilegedBrokerClient implements BrokerSignedProofOperations {
     }
   }
   async verifyPin(pin: string): Promise<boolean> { const result = await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), operation: 'verify-pin', payload: { pin } }) as { ok?: boolean; token?: string }; this.token = result.ok ? result.token : undefined; return Boolean(this.token) }
+  async revokePin(): Promise<void> {
+    this.token = undefined
+    await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), operation: 'revoke-pin', payload: {} })
+  }
   async changePin(newPin: string): Promise<void> { await this.transport({ capability: 'membership', purpose: 'membership-sync', nonce: nonce(), adminSession: this.token, operation: 'change-pin', payload: { newPin } }); this.token = undefined }
   async readLocalPolicy(): Promise<ProtectedLocalPolicy> {
     return this.transport({ capability: 'operational', purpose: 'remote-approval', nonce: nonce(), operation: 'read-local-policy', payload: {} }) as Promise<ProtectedLocalPolicy>

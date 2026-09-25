@@ -7,7 +7,7 @@ import {
   readDailyUsage,
   writeDailyUsage,
 } from './fileStore'
-import { grantAdminSession, requireAdminSession, hasAdminSession, clearAdminSession } from './adminAuth'
+import { adminLockGeneration, grantAdminSession, requireAdminSession, hasAdminSession, clearAdminSession, clearAllAdminSessions } from './adminAuth'
 
 import { redactSettings } from '../shared/policy'
 import { isDailyUsageExhausted, normalizeDailyUsage, shouldPersistNormalizedDailyUsage } from '../shared/dailyUsage'
@@ -61,6 +61,7 @@ export function registerIpcHandlers(callbacks: {
   readDailyRemaining?: () => Promise<DailyRemaining>
   approveNextSession?: () => Promise<boolean>
   verifyAdminPin?: (pin: string) => Promise<boolean>
+  revokeAdminPin?: () => Promise<void>
   changeAdminPin?: (newPin: string) => Promise<void>
   protectLocalPolicy?: (settings: PublicSettings) => Promise<void>
   remote?: {
@@ -71,7 +72,12 @@ export function registerIpcHandlers(callbacks: {
 } = {}): void {
   ipcMain.handle('settings:read', async () => callbacks.readPublicSettings?.() ?? redactSettings(readSettings()))
   ipcMain.handle('admin:is-unlocked', async (event) => hasAdminSession(event))
-  ipcMain.handle('admin:lock', async (event) => { clearAdminSession(event.sender.id) })
+  ipcMain.handle('admin:lock', async (event) => {
+    clearAdminSession(event.sender.id)
+    clearAllAdminSessions()
+    for (const win of BrowserWindow.getAllWindows()) win.webContents.send('admin:locked')
+    await callbacks.revokeAdminPin?.()
+  })
 
   ipcMain.handle('settings:write', async (event, settings: PublicSettings) => {
     requireAdminSession(event)
@@ -88,15 +94,21 @@ export function registerIpcHandlers(callbacks: {
 
 
   ipcMain.handle('admin:verify-password', async (event, { pin }: { pin: string }) => {
+    const generation = adminLockGeneration(event.sender.id)
     const ok = await verifyAdminPin(pin, callbacks.verifyAdminPin)
-    if (ok) grantAdminSession(event)
-    return ok
+    if (!ok) return false
+    if (grantAdminSession(event, generation)) return true
+    await callbacks.revokeAdminPin?.()
+    return false
   })
 
   ipcMain.handle('admin:unlock-settings', async (event, { pin }: { pin: string }) => {
+    const generation = adminLockGeneration(event.sender.id)
     const ok = await verifyAdminPin(pin, callbacks.verifyAdminPin)
-    if (ok) grantAdminSession(event)
-    return ok
+    if (!ok) return false
+    if (grantAdminSession(event, generation)) return true
+    await callbacks.revokeAdminPin?.()
+    return false
   })
 
   ipcMain.handle('admin:approve-next-session', async (_event, { pin }: { pin: string }) => {

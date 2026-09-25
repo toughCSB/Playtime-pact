@@ -126,7 +126,9 @@ describe('renderer frontend overhaul contract', () => {
     expect(settings).toContain('setSettings(persistedSettings)')
     expect(settings).toContain('설정 서비스에 연결할 수 없어요')
     expect(settings).toContain('종료 서비스에 연결할 수 없어요')
-    expect(settings).toContain('창을 숨기지 못했어요')
+    expect(settings).toContain('aria-label="잠금 후 최소화"')
+    expect(settings).toContain('onClick={onLock}')
+    expect(admin).toContain('const locking = window.api?.adminLock()')
   })
 
   it('marks terminal admin timer ticks as stopped', async () => {

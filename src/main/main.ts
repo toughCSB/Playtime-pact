@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, Tray, nativeImage } from 'electron'
+import { app, BrowserWindow, ipcMain, powerMonitor, screen, Tray, nativeImage } from 'electron'
 import { join } from 'path'
 import { exec, execFileSync, spawn } from 'child_process'
 import { performance } from 'node:perf_hooks'
@@ -13,7 +13,7 @@ import { RemoteApprovalApiClient } from './remoteApproval/apiClient'
 import { PRIVILEGED_PIPE, PrivilegedApprovalService, PrivilegedBrokerClient, namedPipeTransport, startPrivilegedPipeServer, type ProtectedLocalPolicy } from './remoteApproval/privilegedService'
 import { formatPrivilegedHealthDiagnostic } from './remoteApproval/privilegedHealthDiagnostic'
 import { loadRemoteApprovalRuntimeConfig, RemoteApprovalConfigError, remoteMutableStatePath, WindowsCngRemoteApprovalBroker, type RemoteApprovalRuntimeConfig } from './remoteApproval/runtimeBroker'
-import { requireAdminSession } from './adminAuth'
+import { clearAdminSession, clearAllAdminSessions, requireAdminSession } from './adminAuth'
 import {
   readSettings, writeTimerState, clearTimerState, readTimerState,
   appendSession, readSessions,
@@ -81,11 +81,13 @@ function broadcastTimerTick(remainingSeconds: number): void {
 }
 
 let timerStart: number | null = null
+let timerDay: string | null = null
 let timerLimitMs: number | null = null
 let timerStartReceipt: string | undefined
 let timerSessionStartTime = ''
 let timerLimitAtSession = 0
 let timerInterval: ReturnType<typeof setInterval> | null = null
+let timerHeartbeatAt = 0
 const warnedMinutes = new Set<number>()
 let inCenterMode = false
 let timerUiMode: 'corner' | 'center-popup' | 'center-countdown' | 'shutdown' = 'corner'
@@ -604,7 +606,9 @@ function isSessionExhausted(today: string): boolean {
 
 function pauseTimerInternals(): void {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null }
+  timerHeartbeatAt = 0
   timerStart = null
+  timerDay = null
   timerLimitMs = null
   timerStartReceipt = undefined
   timerSessionStartTime = ''
@@ -619,7 +623,9 @@ function pauseTimerInternals(): void {
 
 function stopTimerInternals(clearPersistedState = true): void {
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null }
+  timerHeartbeatAt = 0
   timerStart = null
+  timerDay = null
   timerLimitMs = null
   timerStartReceipt = undefined
   timerSessionStartTime = ''
@@ -634,12 +640,12 @@ function stopTimerInternals(clearPersistedState = true): void {
   centerPopupEpoch++
 }
 
-function persistPausedTimer(): void {
+function persistPausedTimer(writeProtected = true): void {
   if (timerStart === null || timerLimitMs === null) return
   const remainingMs = Math.max(0, timerLimitMs - (Date.now() - timerStart))
   const today = getLocalDateString()
   const usage = getDailyUsage()
-  safeWriteDailyUsage({
+  if (writeProtected) safeWriteDailyUsage({
     date: today,
     sessionsCompleted: (usage?.date === today ? usage.sessionsCompleted : 0),
     currentSessionRemainingMs: remainingMs,
@@ -1020,13 +1026,13 @@ function restoreCornerAfterPopup(win: BrowserWindow, epoch: number): void {
   moveToCorner(win)
 }
 
-function completeActiveTimer(win: BrowserWindow, authorizedAdjustment = false): void {
+function completeActiveTimer(win: BrowserWindow, authorizedAdjustment = false, dayRollover = false): void {
   if (isManagedGameTerminationInFlight()) return
   if (timerLimitMs === null || gameTerminationPending || (timerAdjustmentInFlight && !authorizedAdjustment)) return
   gameTerminationPending = true
   gameTerminationAttemptFinished = false
-  const today = getLocalDateString()
-  const usage = getDailyUsage()
+  const today = dayRollover ? timerDay ?? getLocalDateString() : getLocalDateString()
+  const usage = dayRollover ? null : getDailyUsage()
   const closedAt = new Date().toISOString()
   closeOpenPresenceSpans(activeManagedGameIds, 'expired', closedAt)
 
@@ -1037,7 +1043,7 @@ function completeActiveTimer(win: BrowserWindow, authorizedAdjustment = false): 
     ...activeManagedGameIds,
   ]))
 
-  safeWriteDailyUsage({
+  if (!dayRollover) safeWriteDailyUsage({
     date: today,
     sessionsCompleted: (usage?.date === today ? usage.sessionsCompleted : 0) + (countsTowardDailySessions ? 1 : 0),
     currentSessionRemainingMs: 0,
@@ -1057,6 +1063,7 @@ function completeActiveTimer(win: BrowserWindow, authorizedAdjustment = false): 
     countsTowardDailySessions,
   }
   stopTimerInternals()
+  if (dayRollover) void requireProtectedPolicyReadiness().catch(handleUsagePersistenceFailure)
   const { w, h, x, y } = getCenterInfo()
   win.setBounds({ x, y, width: w, height: h }, false)
   win.setAlwaysOnTop(true, 'floating')
@@ -1239,6 +1246,7 @@ async function startTimer(win: BrowserWindow, limitMinutes: number, options: Sta
   } else {
     timerStart = options.startTime ?? Date.now()
   }
+  timerDay = getLocalDateString()
 
   warnedMinutes.clear()
   inCenterMode = false
@@ -1278,6 +1286,7 @@ async function startTimer(win: BrowserWindow, limitMinutes: number, options: Sta
       presenceSpans: [...quotaPresenceSpans],
       primarySelectionEvents: [...quotaPrimarySelectionEvents],
       startReceipt: options.startReceipt,
+      pausedRemainingMs: options.resumeRemainingMs ?? limitMs,
     })
   }
 
@@ -1287,6 +1296,11 @@ async function startTimer(win: BrowserWindow, limitMinutes: number, options: Sta
 
   timerInterval = setInterval(() => {
     if (timerStart === null || timerLimitMs === null) return
+
+    if (timerDay !== getLocalDateString()) {
+      completeActiveTimer(win, false, true)
+      return
+    }
 
     // Presence is sampled independently by startManagedGameDetection. Never
     // await OS process enumeration on the clock/warning/expiry path.
@@ -1300,6 +1314,27 @@ async function startTimer(win: BrowserWindow, limitMinutes: number, options: Sta
     const elapsed = Date.now() - timerStart
     const remaining = Math.max(0, timerLimitMs - elapsed)
     const remainingSeconds = Math.ceil(remaining / 1000)
+
+    // Keep a durable, protected checkpoint while games are actually running.
+    // Shutdown and power loss cannot rely on an asynchronous quit callback.
+    if (remaining > 0 && Date.now() - timerHeartbeatAt >= 5_000
+      && usageWritesPending === 0 && !timerAdjustmentInFlight && !accountingIntegrityFault) {
+      timerHeartbeatAt = Date.now()
+      const today = getLocalDateString()
+      const usage = getDailyUsage()
+      if (!accountingIntegrityFault && usage.date === today) {
+        safeWriteDailyUsage({ ...usage, currentSessionRemainingMs: remaining }, true)
+        if (readSettings().resumeTimerOnRestart || timerStartReceipt) {
+          safeWriteTimerState({
+            startTime: timerStart, limitMs: timerLimitMs, date: today, pausedRemainingMs: remaining,
+            sessionStartTime: timerSessionStartTime, limitAtSession: timerLimitAtSession,
+            primaryGameId: primaryManagedGameId ?? undefined, activeGameIds: [...activeManagedGameIds],
+            presenceSpans: [...quotaPresenceSpans], primarySelectionEvents: [...quotaPrimarySelectionEvents],
+            startReceipt: timerStartReceipt,
+          })
+        }
+      }
+    }
 
     broadcastTimerTick(remainingSeconds)
 
@@ -1470,7 +1505,14 @@ function openAdminWindow(): void {
     adminWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'admin' })
   }
 
-  adminWindow.on('closed', () => { adminWindow = null })
+  const adminContentsId = adminWindow.webContents.id
+  adminWindow.on('closed', () => {
+    clearAdminSession(adminContentsId)
+    clearAllAdminSessions()
+    mainWindow?.webContents.send('admin:locked')
+    void privilegedBroker.revokePin().catch(() => undefined)
+    adminWindow = null
+  })
 }
 
 function addTrayClick(count = 1): void {
@@ -1680,6 +1722,15 @@ function createWindow(): void {
     if (allowQuit) return
     e.preventDefault()
     mainWindow?.hide()
+  })
+  mainWindow.on('hide', () => {
+    const contents = mainWindow?.webContents
+    if (!contents || contents.isDestroyed()) return
+    clearAdminSession(contents.id)
+    clearAllAdminSessions()
+    void privilegedBroker.revokePin().catch(() => undefined)
+    contents.send('admin:locked')
+    adminWindow?.webContents.send('admin:locked')
   })
   mainWindow.on('moved', () => {
     const win = mainWindow
@@ -1926,6 +1977,12 @@ if (initializeLocalProtectionMode && !privilegedServiceMode) {
       stateDir,
     )
     await startPrivilegedPipeServer(hosted)
+    const pauseProtectedUsage = () => {
+      try { hosted.pauseUsageForShutdown() }
+      catch (error) { console.error('protected usage power checkpoint failed', error) }
+    }
+    powerMonitor.on('shutdown', pauseProtectedUsage)
+    powerMonitor.on('suspend', pauseProtectedUsage)
   }).catch((error: unknown) => { process.stderr.write(formatPrivilegedHealthDiagnostic(error)); app.exit(1) })
 } else if (privilegedHealthCheckMode) {
   app.whenReady().then(async () => {
@@ -1967,7 +2024,9 @@ app.whenReady().then(async () => {
       return publicSettings
     },
     readDailyRemaining: async () => {
-      if (!protectedLocalPolicy || accountingIntegrityFault) throw new Error('Protected usage unavailable')
+      if (!protectedLocalPolicy) throw new Error('Protected usage unavailable')
+      if (volatileDailyUsage?.date !== getLocalDateString()) await requireProtectedPolicyReadiness()
+      if (accountingIntegrityFault) throw new Error('Protected usage unavailable')
       const usage = getDailyUsage()
       const { sessionsPerDay, perSessionMinutes } = getTodaySessionCount()
       const exhausted = accountingIntegrityFault || isDailyUsageExhausted(usage, sessionsPerDay)
@@ -1977,6 +2036,7 @@ app.whenReady().then(async () => {
     },
     approveNextSession,
     verifyAdminPin: (pin) => privilegedBroker.verifyPin(pin),
+    revokeAdminPin: () => privilegedBroker.revokePin(),
     changeAdminPin: (newPin) => privilegedBroker.changePin(newPin),
     protectLocalPolicy: async (settings) => {
       const ianaTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -2016,6 +2076,16 @@ app.whenReady().then(async () => {
   createWindow()
   createTray()
   startManagedGameDetection()
+  powerMonitor.on('suspend', () => {
+    if (timerStart !== null) {
+      persistPausedTimer(false)
+      pauseTimerInternals()
+    }
+  })
+  powerMonitor.on('resume', () => {
+    if (timerStart !== null) pauseTimerInternals()
+    void requireProtectedPolicyReadiness().catch(handleUsagePersistenceFailure)
+  })
 
   mainWindow?.webContents.once('did-finish-load', async () => {
     if (mainWindow && showQaOverlayEvidence(mainWindow)) return
